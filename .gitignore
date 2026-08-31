@@ -1,0 +1,5 @@
+.build/
+.DS_Store
+*.app/
+TabSwipe.dmg
+.claude/settings.local.json
