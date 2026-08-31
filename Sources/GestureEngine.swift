@@ -2,8 +2,22 @@ import Cocoa
 import ApplicationServices
 import os
 
+// Wiring between the private multitouch framework and Chrome:
+//
+//   trackpad ──MT callback thread──▶ SwipeDetector ──▶ Ctrl(+Shift)+Tab
+//                                    (under lock)       posted to Chrome's pid
+//
+// Touch frames arrive on a framework-owned background thread, so all mutable
+// state lives behind one unfair lock and nothing slow ever runs under it.
+// The main thread only touches this file through GestureEngine (device
+// lifecycle, settings) and the NSWorkspace observers (frontmost-app cache).
+
 private let chromeBundleID = "com.google.Chrome"
-private let kTabKey: UInt16 = 48  // Ctrl+Tab / Ctrl+Shift+Tab: Chrome tab cycling, immune to page capture
+
+/// The Tab key. Ctrl+Tab / Ctrl+Shift+Tab are Chrome's browser-reserved
+/// tab-cycling shortcuts — unlike Cmd+Opt+Arrow, web pages (Google Docs,
+/// code editors) can never capture them.
+private let kTabKey: UInt16 = 48
 
 // MARK: - Thread-safe State (accessed from the MultitouchSupport callback thread)
 
@@ -18,6 +32,8 @@ private let eventSource = CGEventSource(stateID: .hidSystemState)
 // MARK: - Keystroke Posting
 
 private func postTabSwitch(_ event: SwipeEvent, to pid: pid_t) {
+    // Without the Accessibility grant, posted events are silently dropped by
+    // macOS anyway — checking here keeps the failure observable at one spot.
     guard AXIsProcessTrusted() else { return }
     guard let keyDown = CGEvent(keyboardEventSource: eventSource, virtualKey: kTabKey, keyDown: true),
           let keyUp = CGEvent(keyboardEventSource: eventSource, virtualKey: kTabKey, keyDown: false)
@@ -28,13 +44,18 @@ private func postTabSwitch(_ event: SwipeEvent, to pid: pid_t) {
     keyDown.flags = flags
     keyUp.flags = flags
 
-    // Post directly to Chrome's pid: no frontmost race, can't leak into other apps.
+    // Post directly to Chrome's pid rather than the system HID stream:
+    // the keystroke can only ever reach Chrome, even if the user switches
+    // apps between gesture detection and delivery.
     keyDown.postToPid(pid)
     keyUp.postToPid(pid)
 }
 
 // MARK: - Touch Callback
 
+/// Runs on MultitouchSupport's background thread for every contact frame
+/// (~90 Hz while touching). Summarizes the frame, runs the detector under
+/// the lock, and posts any resulting keystroke after releasing it.
 private let touchCallback: MTContactCallback = { _, rawTouches, count, timestamp, _ in
     let n = Int(count)
     let touches = rawTouches.bindMemory(to: MTTouch.self, capacity: n)
@@ -77,11 +98,16 @@ private let touchCallback: MTContactCallback = { _, rawTouches, count, timestamp
 
 // MARK: - GestureEngine
 
+/// Owns the device lifecycle and feeds settings into the detector.
+/// Main-thread only (asserted); the touch callback above is the sole
+/// background-thread entry point.
 public final class GestureEngine {
     public static let shared = GestureEngine()
 
     private let mt = MTFramework.shared
-    private var deviceList: CFArray?  // owns the MTDeviceRefs; must outlive them
+    // MTDeviceCreateList's array owns the MTDeviceRefs (CF Create rule);
+    // holding it here is what keeps the raw pointers in `devices` alive.
+    private var deviceList: CFArray?
     private var devices: [MTDeviceRef] = []
     private var isRunning = false
     private var observers: [NSObjectProtocol] = []

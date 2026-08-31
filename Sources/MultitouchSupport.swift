@@ -2,15 +2,27 @@ import Foundation
 
 // MARK: - MultitouchSupport Private API
 //
-// Loaded at runtime via dlopen/dlsym rather than hard-linking, so if a future
-// macOS removes or renames these symbols the app still launches (with gestures
-// disabled and a menu warning) instead of dying in dyld before main().
+// MultitouchSupport is the only way to observe raw trackpad touches
+// system-wide: NSEvent global monitors don't deliver other apps' gesture
+// events, and CGEventTaps never see three-finger swipes the WindowServer
+// has already claimed for Spaces/Mission Control. Every gesture utility in
+// this class (BetterTouchTool, Multitouch, ...) uses this same framework.
+//
+// Because it is private, we bind it at runtime via dlopen/dlsym rather than
+// hard-linking. If a future macOS removes or renames a symbol, the app still
+// launches — gestures disable and the menu shows a warning — instead of
+// being killed by dyld before main() with no user-visible explanation.
 
 typealias MTDeviceRef = UnsafeMutableRawPointer
 
 struct MTPoint { var x: Float; var y: Float }
 struct MTReadout { var pos: MTPoint; var vel: MTPoint }
 
+/// Reverse-engineered layout of one touch contact, stable since ~10.5
+/// (96 bytes on arm64). Swift doesn't formally guarantee C-compatible
+/// struct layout, so the touch callback sanity-checks `normalized.pos`
+/// before trusting a frame — if Apple ever shifts a field, we drop data
+/// rather than act on garbage.
 struct MTTouch {
     var frame: Int32
     var timestamp: Double
@@ -38,6 +50,9 @@ typealias MTContactCallback = @convention(c) (
     Int32
 ) -> Void
 
+/// The subset of MultitouchSupport we use, resolved once at first access.
+/// `shared` is nil when the framework or a required symbol is missing —
+/// callers treat that as "gestures unavailable", never as a crash.
 struct MTFramework {
     typealias CreateListFn = @convention(c) () -> UnsafeMutableRawPointer?
     typealias RegisterFn = @convention(c) (MTDeviceRef, MTContactCallback) -> Void
@@ -80,6 +95,7 @@ struct MTFramework {
             registerContactFrameCallback: register,
             deviceStart: start,
             deviceStop: stop,
+            // Optional: absent on some macOS versions; stop() copes without it.
             unregisterContactFrameCallback: sym("MTUnregisterContactFrameCallback", as: RegisterFn.self)
         )
     }()

@@ -19,6 +19,9 @@ struct TabSwipeApp {
 
 // MARK: - AppDelegate
 
+/// All UI: the menu bar item, its menu (rebuilt fresh on every open so it
+/// always reflects live permission/settings state), and the two one-time
+/// onboarding flows — the Accessibility grant and the trackpad-gesture tip.
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!

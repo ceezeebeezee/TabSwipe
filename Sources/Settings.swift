@@ -1,5 +1,7 @@
 import Foundation
 
+/// UserDefaults-backed settings. `register(defaults:)` in init supplies the
+/// unset-key values, so the plain accessors below never need fallbacks.
 public final class AppSettings {
     public static let shared = AppSettings()
 
