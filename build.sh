@@ -264,8 +264,10 @@ HOW IT WORKS:
   Click the menu bar icon to adjust swipe distance and direction.
 
 UNINSTALL:
-  Quit TabSwipe from the menu bar icon, then drag
-  TabSwipe.app from Applications to the Trash.
+  Click the menu bar icon and choose "Uninstall TabSwipe".
+  It removes the login item and its settings, moves itself
+  to the Trash, and shows you where to clear its leftover
+  Accessibility permission.
 README
 
 hdiutil create -volname "TabSwipe" \

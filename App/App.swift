@@ -25,6 +25,29 @@ struct TabSwipeApp {
 /// onboarding flows — the Accessibility grant and the trackpad-gesture tip.
 class AppDelegate: NSObject, NSApplicationDelegate {
     static let websiteURL = URL(string: "https://czbz.ai/tabswipe")
+    static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+
+    /// Everything TabSwipe leaves outside its own bundle. Kept in one place so
+    /// Uninstall cannot drift out of sync with what actually accumulates —
+    /// the last three are created by Sparkle rendering release notes in a
+    /// WebView, and did not exist before it was added.
+    private static var supportFileURLs: [URL] {
+        guard
+            let id = Bundle.main.bundleIdentifier,
+            let library = try? FileManager.default.url(
+                for: .libraryDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: false)
+        else { return [] }
+
+        return [
+            "Preferences/\(id).plist",
+            "Saved Application State/\(id).savedState",
+            "Caches/\(id)",
+            "HTTPStorages/\(id)",
+            "WebKit/\(id)",
+        ].map { library.appendingPathComponent($0) }
+    }
 
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
@@ -246,6 +269,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         aboutItem.target = self
         menu.addItem(aboutItem)
 
+        // Uninstall
+        let uninstallItem = NSMenuItem(title: "Uninstall TabSwipe…", action: #selector(uninstall(_:)), keyEquivalent: "")
+        uninstallItem.target = self
+        menu.addItem(uninstallItem)
+
+        menu.addItem(.separator())
+
         // Quit
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit(_:)), keyEquivalent: "q")
         quitItem.target = self
@@ -255,7 +285,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func openAccessibilitySettings(_ sender: NSMenuItem) {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+        if let url = Self.accessibilitySettingsURL {
             NSWorkspace.shared.open(url)
         }
     }
@@ -333,6 +363,113 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertSecondButtonReturn, let url = Self.websiteURL {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func uninstall(_ sender: NSMenuItem) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "Uninstall TabSwipe?"
+        alert.informativeText = """
+            This turns off Start at Login, deletes TabSwipe's settings, moves \
+            the app to the Trash, and quits.
+
+            Afterwards you will be shown how to remove TabSwipe's Accessibility \
+            permission — the one part macOS does not allow an app to do for \
+            itself.
+            """
+        alert.addButton(withTitle: "Uninstall")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.buttons[1].keyEquivalent = "\u{1b}"  // Esc cancels
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        performUninstall()
+    }
+
+    /// The teardown itself, split from the confirmation so it can be exercised
+    /// without a click. Safe to call only once — it ends in exit().
+    func performUninstall() {
+        // Order is not arbitrary. The login item has to go first, while the
+        // bundle still exists: SMAppService identifies it by the app it points
+        // at, so once that is in the Trash the registration cannot be undone
+        // and System Settings is left with an entry the user can only clear by
+        // resetting every app's login items.
+        if SMAppService.mainApp.status == .enabled {
+            do {
+                try SMAppService.mainApp.unregister()
+            } catch {
+                Log.error("Uninstall: could not unregister login item: \(error)")
+            }
+        }
+
+        GestureEngine.shared.stop()
+
+        // removePersistentDomain rather than just unlinking the plist: the
+        // preferences daemon holds them in memory and would write them back
+        // out over the deletion.
+        if let domain = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+        }
+        for url in Self.supportFileURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        // Trashing the bundle out from under the running process is allowed —
+        // the executable stays mapped, so this alert and the one after it still
+        // work. Async because recycle reports failure via its completion.
+        let bundleURL = Bundle.main.bundleURL
+        NSWorkspace.shared.recycle([bundleURL]) { [weak self] _, error in
+            DispatchQueue.main.async {
+                self?.finishUninstall(bundleURL: bundleURL, trashError: error)
+            }
+        }
+    }
+
+    private func finishUninstall(bundleURL: URL, trashError: Error?) {
+        let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
+
+        if let trashError {
+            // Read-only volume, still on the disk image, or App Translocation.
+            alert.alertStyle = .warning
+            alert.messageText = "Settings removed — delete the app yourself"
+            alert.informativeText = """
+                The login item and TabSwipe's settings are gone, but the app \
+                could not be moved to the Trash: \(trashError.localizedDescription)
+
+                Drag TabSwipe to the Trash, then remove it under System Settings \
+                › Privacy & Security › Accessibility.
+                """
+            alert.addButton(withTitle: "Show Me the App")
+            alert.addButton(withTitle: "Quit")
+        } else {
+            alert.messageText = "TabSwipe is uninstalled"
+            alert.informativeText = """
+                The app is in the Trash and its settings are gone.
+
+                One last step, which macOS only allows you to do: open Privacy & \
+                Security › Accessibility, select TabSwipe, and click the minus \
+                button to remove its leftover permission.
+                """
+            alert.addButton(withTitle: "Open Accessibility Settings")
+            alert.addButton(withTitle: "Done")
+        }
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            if trashError != nil {
+                NSWorkspace.shared.activateFileViewerSelecting([bundleURL])
+            } else if let url = Self.accessibilitySettingsURL {
+                NSWorkspace.shared.open(url)
+            }
+        }
+
+        // exit() rather than terminate(): the normal shutdown path would give
+        // AppKit a chance to write window and status-item state back into the
+        // defaults domain we just deleted.
+        exit(0)
     }
 
     @objc private func quit(_ sender: NSMenuItem) {
