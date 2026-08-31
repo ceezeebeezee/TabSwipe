@@ -1,5 +1,6 @@
 import Cocoa
 import ServiceManagement
+import Sparkle
 import TabSwipeCore
 
 // MARK: - App Entry Point
@@ -29,7 +30,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: NSMenu!
     private var accessibilityCheckTimer: Timer?
 
+    /// Sparkle. The check interval and feed URL live in Info.plist; this only
+    /// has to exist and be started. Held strongly for the process lifetime —
+    /// releasing it stops the scheduled checks.
+    private var updaterController: SPUStandardUpdaterController!
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before the menu is built: the Check for Updates item targets it.
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+
         setupStatusItem()
         buildMenu()
 
@@ -222,6 +235,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        // Check for Updates
+        let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+        updateItem.target = self
+        updateItem.isEnabled = updaterController.updater.canCheckForUpdates
+        menu.addItem(updateItem)
+
         // About
         let aboutItem = NSMenuItem(title: "About TabSwipe", action: #selector(showAbout(_:)), keyEquivalent: "")
         aboutItem.target = self
@@ -279,6 +298,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             statusItem.isVisible = false
         }
+    }
+
+    @objc private func checkForUpdates(_ sender: NSMenuItem) {
+        // Same reason as the About dialog: an LSUIElement app is not frontmost
+        // when its menu is clicked, so Sparkle's window would open behind
+        // whatever the user was looking at.
+        NSApp.activate(ignoringOtherApps: true)
+        updaterController.checkForUpdates(sender)
     }
 
     @objc private func showAbout(_ sender: NSMenuItem) {

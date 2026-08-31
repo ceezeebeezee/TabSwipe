@@ -2,5 +2,6 @@
 .DS_Store
 *.app/
 TabSwipe.dmg
+TabSwipe-*.zip
 .claude/settings.local.json
 setup-signing.sh

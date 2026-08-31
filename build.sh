@@ -3,11 +3,24 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Single source of truth for the release version. Sparkle compares this against
+# the appcast to decide whether an update exists, so bumping it here is what
+# makes a build "new" to everyone already running TabSwipe.
+VERSION="1.0"
+
 APP_NAME="TabSwipe"
 APP_BUNDLE="$APP_NAME.app"
 DMG_NAME="$APP_NAME.dmg"
+ZIP_NAME="$APP_NAME-$VERSION.zip"   # what Sparkle downloads
 TEAM_ID="GFJX8GLA7X"
 NOTARIZE_PROFILE="TabSwipe-Notarize"
+
+# Public half of the EdDSA keypair from Sparkle's generate_keys. The private
+# half lives in the login keychain and never leaves this machine; sign_update
+# reads it when publishing. Updates that do not verify against this key are
+# rejected, so a compromised czbz.ai cannot push code to users.
+SU_PUBLIC_KEY="eLIQXX+ZAxPKcNygk5MeXRHXf7zJl0/CJDcMee+kpSw="
+SU_FEED_URL="https://czbz.ai/tabswipe/appcast.xml"
 
 # ~/Projects is inside a Google Drive synced folder. Drive's virtual filesystem
 # does not honour SQLite's locking and fsync guarantees, so SwiftPM's build.db
@@ -35,7 +48,40 @@ if [ -f "TabSwipe.icns" ]; then
     cp TabSwipe.icns "$APP_BUNDLE/Contents/Resources/TabSwipe.icns"
 fi
 
-cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+# --- Embed Sparkle ---
+# SwiftPM links against the XCFramework but has no notion of an app bundle, so
+# the framework has to be placed and signed by hand. ditto (not cp) preserves
+# the symlink farm a versioned framework needs for its signature to validate.
+SPARKLE_FW="$SCRATCH/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [ ! -d "$SPARKLE_FW" ]; then
+    echo "✗ Sparkle.framework not found. Run: swift package resolve --scratch-path $SCRATCH"
+    exit 1
+fi
+
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+ditto "$SPARKLE_FW" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+
+SPARKLE_VERSION_DIR="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/Current"
+
+# XPC Services exist to let *sandboxed* apps delegate downloading and
+# installing. TabSwipe cannot be sandboxed (it drives Chrome through the
+# Accessibility API), so they are dead weight — Sparkle's own docs say to
+# remove them. Headers and module maps are build-time only.
+rm -rf "$SPARKLE_VERSION_DIR/XPCServices"
+rm -rf "$SPARKLE_VERSION_DIR/Headers" "$SPARKLE_VERSION_DIR/PrivateHeaders" "$SPARKLE_VERSION_DIR/Modules"
+rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Headers" \
+       "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/PrivateHeaders" \
+       "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Modules" \
+       "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/XPCServices"
+
+# The executable records Sparkle's install name as @rpath/... but SwiftPM adds
+# no matching LC_RPATH, so without this the app dies at launch with "Library
+# not loaded". Must happen before signing: it rewrites the Mach-O header.
+install_name_tool -add_rpath "@executable_path/../Frameworks" \
+    "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null
+
+# Unquoted heredoc: $VERSION and the Sparkle settings are interpolated.
+cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -47,9 +93,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.tabswipe.app</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>TabSwipe</string>
     <key>CFBundlePackageType</key>
@@ -66,6 +112,27 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUFeedURL</key>
+    <string>$SU_FEED_URL</string>
+    <key>SUPublicEDKey</key>
+    <string>$SU_PUBLIC_KEY</string>
+    <!-- Weekly. Sparkle's default is 86400 (daily); its floor is one hour. -->
+    <key>SUScheduledCheckInterval</key>
+    <integer>604800</integer>
+    <!-- SUEnableAutomaticChecks is deliberately absent: with it unset Sparkle
+         asks the user, on second launch, whether to check automatically.
+         Opting in beats deciding for them for an app that used to make no
+         network connections at all. -->
+    <!-- No silent background installs, and no offering them to the user. This
+         is what keeps TabSwipe free of resident processes: when Sparkle stages
+         an update to apply on quit, it leaves Autoupdate and Updater.app
+         running until the host exits — for an app people never quit that means
+         two processes resident for days (WhatsApp does exactly this). With
+         installs strictly user-initiated, those helpers spawn, swap the bundle,
+         relaunch and exit within seconds. The weekly check itself is just a
+         timer inside TabSwipe's own process. -->
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
 </dict>
 </plist>
 PLIST
@@ -78,21 +145,42 @@ lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | sed 's/^/   /'
 # Fall back to self-signed cert (for local dev)
 DEV_ID_CERT=$(security find-identity -v -p codesigning | grep "Developer ID Application" | grep "$TEAM_ID" | head -1 | awk -F'"' '{print $2}')
 
+# Sparkle arrives signed by the Sparkle project, and stripping the XPC services
+# invalidated that signature — so everything nested gets re-signed with our own
+# identity. Order matters: innermost first, outermost last, because signing a
+# bundle seals the hashes of everything already inside it. Signing the app first
+# would bake in hashes that the framework signature then invalidates.
+sign_sparkle() {
+    local identity="$1"
+    shift
+    local fw="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+    for nested in \
+        "$fw/Versions/Current/Updater.app" \
+        "$fw/Versions/Current/Autoupdate"
+    do
+        [ -e "$nested" ] && codesign --force "$@" --sign "$identity" "$nested"
+    done
+    codesign --force "$@" --sign "$identity" "$fw"
+}
+
 if [ -n "$DEV_ID_CERT" ]; then
     echo "Signing with: $DEV_ID_CERT"
 
     # No entitlements needed: plain Swift/AppKit app, no JIT
+    sign_sparkle "$DEV_ID_CERT" --options runtime --timestamp
     codesign --force --options runtime --timestamp \
         --sign "$DEV_ID_CERT" \
         "$APP_BUNDLE"
 
     SIGN_MODE="developer-id"
-    echo "✓ Signed with Developer ID + hardened runtime"
+    echo "✓ Signed with Developer ID + hardened runtime (app + Sparkle)"
 elif security find-identity -v -p codesigning | grep -q "TabSwipe Signing"; then
+    sign_sparkle "TabSwipe Signing"
     codesign --sign "TabSwipe Signing" --force "$APP_BUNDLE"
     SIGN_MODE="self-signed"
     echo "✓ Signed with self-signed cert (for local use only)"
 else
+    sign_sparkle -
     codesign --sign - --force "$APP_BUNDLE"
     SIGN_MODE="ad-hoc"
     echo "⚠ Ad-hoc signed — the code-signing identity changes on EVERY rebuild."
@@ -212,6 +300,26 @@ if [ "$NOTARY_READY" = "yes" ]; then
         echo "⚠ DMG notarization failed. For details:"
         echo "   xcrun notarytool submit $DMG_NAME --keychain-profile $NOTARIZE_PROFILE --wait --verbose"
     fi
+fi
+
+# --- Build the Sparkle update archive ---
+# Sparkle downloads a zip, not the DMG: no mounting, and the app inside is
+# already stapled. --sequesterRsrc preserves the symlinks a versioned framework
+# needs, without which Sparkle.framework's signature fails to validate after
+# the round trip.
+echo ""
+echo "Creating $ZIP_NAME (Sparkle update archive)..."
+rm -f "$ZIP_NAME"
+ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_NAME"
+
+SIGN_UPDATE="$SCRATCH/artifacts/sparkle/Sparkle/bin/sign_update"
+if [ -x "$SIGN_UPDATE" ]; then
+    echo ""
+    echo "Appcast entry — paste into czbz/tabswipe/appcast.xml:"
+    echo "   version $VERSION, published $(date -u '+%a, %d %b %Y %H:%M:%S +0000')"
+    "$SIGN_UPDATE" "$ZIP_NAME" | sed 's/^/   /'
+else
+    echo "⚠ sign_update not found; cannot sign the update archive."
 fi
 
 # --- Verify what Gatekeeper will actually see ---
