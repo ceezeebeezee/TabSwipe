@@ -18,12 +18,22 @@ let package = Package(
             name: "TabSwipeCore",
             path: "Sources"
         ),
+        // Vendored LetsMove (first-run "move to /Applications"). Objective-C with
+        // manual retain/release, so it must be compiled with ARC off. Links
+        // Security for the admin-authorized install path.
+        .target(
+            name: "LetsMove",
+            path: "LetsMove",
+            cSettings: [.unsafeFlags(["-fno-objc-arc"])],
+            linkerSettings: [.linkedFramework("Security")]
+        ),
         // App entry point
         .executableTarget(
             name: "TabSwipe",
             dependencies: [
                 "TabSwipeCore",
-                .product(name: "Sparkle", package: "Sparkle")
+                .product(name: "Sparkle", package: "Sparkle"),
+                "LetsMove"
             ],
             path: "App"
         ),

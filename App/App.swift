@@ -1,5 +1,6 @@
 import Cocoa
 import ServiceManagement
+import LetsMove
 import Sparkle
 import TabSwipeCore
 
@@ -67,13 +68,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// releasing it stops the scheduled checks.
     private var updaterController: SPUStandardUpdaterController!
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        // First, before anything else touches the menu bar or asks for
-        // Accessibility: if this offers to move the app it never returns.
-        // Granting Accessibility to a copy that is about to move would waste
-        // the grant, since macOS keys it to where the bundle lives.
-        offerToInstallIfNeeded()
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // First run: offer to move into /Applications and relaunch from there.
+        // Must precede the menu bar and the Accessibility prompt — macOS keys
+        // the Accessibility grant to the bundle's location, so granting it to a
+        // copy that is about to move would waste the grant. If the user accepts,
+        // LetsMove relaunches the moved copy and terminates this process.
+        // (LetsMove handles the copy, the quarantine flag, and the relaunch;
+        // its shell relaunch shell-quotes the path, and a colliding target is
+        // moved to the Trash rather than deleted.)
+        PFMoveToApplicationsFolderIfNecessary()
+    }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
         // Before the menu is built: the Check for Updates item targets it.
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
@@ -101,7 +108,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Relaunching the app (e.g. from Applications) restores a hidden icon.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        statusItem.isVisible = true
+        // statusItem is nil until applicationDidFinishLaunching; a reopen can
+        // arrive during the first-run move dialog before then.
+        statusItem?.isVisible = true
         return false
     }
 
@@ -392,123 +401,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertSecondButtonReturn, let url = Self.websiteURL {
             NSWorkspace.shared.open(url)
         }
-    }
-
-    // MARK: - First run
-
-    /// The installer. The disk image ships the app alone, with no Applications
-    /// symlink to drag onto, so opening TabSwipe from the mounted image lands
-    /// here and this is what actually installs it. Does not return if the user
-    /// accepts: the installed copy is relaunched and this process exits.
-    private func offerToInstallIfNeeded() {
-        let fm = FileManager.default
-        let bundleURL = Bundle.main.bundleURL
-        let path = bundleURL.path
-
-        let installed = ["/Applications", NSHomeDirectory() + "/Applications"]
-            .contains { path.hasPrefix($0 + "/") }
-        guard !installed else { return }
-
-        let declinedKey = "declinedInstall"
-        guard !UserDefaults.standard.bool(forKey: declinedKey) else { return }
-
-        // Opening an app straight off a disk image runs it from a throwaway
-        // read-only copy somewhere under /private/var — Gatekeeper's path
-        // randomisation. Printing that path would mean nothing to anyone, so
-        // describe the situation instead of the location.
-        let isTranslocated = path.contains("/AppTranslocation/")
-        let isReadOnly = (try? bundleURL.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?
-            .volumeIsReadOnly ?? false
-        let origin = (isTranslocated || isReadOnly)
-            ? "TabSwipe is running from its disk image."
-            : "TabSwipe is running from \(bundleURL.deletingLastPathComponent().path)."
-
-        NSApp.activate(ignoringOtherApps: true)
-
-        let alert = NSAlert()
-        alert.icon = NSApp.applicationIconImage
-        alert.messageText = "Install TabSwipe?"
-        alert.informativeText = """
-            \(origin)
-
-            It will copy itself to your Applications folder and reopen from \
-            there. Run from anywhere else it cannot update itself, and macOS \
-            drops its Accessibility permission as soon as the disk image is \
-            ejected.
-            """
-        alert.addButton(withTitle: "Install")
-        alert.addButton(withTitle: "Not Now")
-        alert.buttons[1].keyEquivalent = "\u{1b}"
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            UserDefaults.standard.set(true, forKey: declinedKey)
-            return
-        }
-
-        let destination = URL(fileURLWithPath: "/Applications")
-            .appendingPathComponent(bundleURL.lastPathComponent)
-
-        // ditto rather than FileManager.copyItem: this bundle contains a
-        // versioned framework whose signature depends on its symlink farm,
-        // and ditto is the tool that reproduces bundles faithfully. Copy
-        // rather than move — the source is often a read-only disk image.
-        // An already-installed copy that is running would carry on from a
-        // deleted bundle and then fight the relaunched one for the same
-        // trackpad gestures, so retire it before overwriting.
-        if let id = Bundle.main.bundleIdentifier {
-            for other in NSRunningApplication.runningApplications(withBundleIdentifier: id)
-            where other != .current {
-                other.terminate()
-            }
-        }
-
-        if fm.fileExists(atPath: destination.path) {
-            try? fm.removeItem(at: destination)
-        }
-        let copy = Process()
-        copy.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        copy.arguments = [path, destination.path]
-        do {
-            try copy.run()
-            copy.waitUntilExit()
-        } catch {
-            Log.error("Move to Applications: ditto failed to start: \(error)")
-        }
-
-        guard copy.terminationStatus == 0, fm.fileExists(atPath: destination.path) else {
-            let failure = NSAlert()
-            failure.alertStyle = .warning
-            failure.messageText = "Could not install TabSwipe"
-            failure.informativeText = """
-                Copying into /Applications failed. Drag TabSwipe there yourself, \
-                then open it again.
-                """
-            failure.runModal()
-            return
-        }
-
-        // The copy inherits the download's quarantine flag, which would make
-        // the relaunch look like a fresh untrusted download.
-        let unquarantine = Process()
-        unquarantine.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
-        unquarantine.arguments = ["-d", "-r", "com.apple.quarantine", destination.path]
-        try? unquarantine.run()
-        unquarantine.waitUntilExit()
-
-        // Relaunch via a detached shell that waits for this process to die
-        // first. Opening immediately would leave two instances briefly fighting
-        // over the same trackpad gestures.
-        let relaunch = Process()
-        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
-        relaunch.arguments = [
-            "-c",
-            "while /bin/kill -0 \(getpid()) 2>/dev/null; do /bin/sleep 0.1; done; "
-                + "/usr/bin/open \"\(destination.path)\"",
-        ]
-        try? relaunch.run()
-
-        Log.info("Moved to \(destination.path); relaunching")
-        exit(0)
     }
 
     @objc private func uninstall(_ sender: NSMenuItem) {
