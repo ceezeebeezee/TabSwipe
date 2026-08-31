@@ -135,22 +135,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Registers TabSwipe as a login item, once, on first run. Returns whether
+    /// it will actually start with the Mac, so the welcome text can say so only
+    /// when it is true.
+    ///
+    /// Only from an Applications folder. A login item records the path it was
+    /// registered from, so doing this while still running out of a download or
+    /// a disk image would enrol a bundle that is about to vanish, and macOS
+    /// keeps showing the dead entry in System Settings afterwards.
+    @discardableResult
+    private func startAtLoginOnFirstRun() -> Bool {
+        let path = Bundle.main.bundleURL.path
+        let installed = ["/Applications", NSHomeDirectory() + "/Applications"]
+            .contains { path.hasPrefix($0 + "/") }
+        guard installed else {
+            Log.info("Not registering a login item: running from \(path)")
+            return false
+        }
+
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            return true
+        case .requiresApproval:
+            // Turned off in System Settings at some point. Re-registering
+            // cannot override that, and should not try to.
+            Log.info("Login item requires approval in System Settings")
+            return false
+        default:
+            do {
+                try SMAppService.mainApp.register()
+                Log.info("Registered as a login item")
+                return true
+            } catch {
+                Log.error("Could not register login item: \(error)")
+                return false
+            }
+        }
+    }
+
     private func showSetupTipsIfNeeded() {
         guard !AppSettings.shared.hasShownSetupTips else { return }
         AppSettings.shared.hasShownSetupTips = true
 
+        let startsAtLogin = startAtLoginOnFirstRun()
+
         let alert = NSAlert()
-        alert.messageText = "One-Time Trackpad Setup"
-        alert.informativeText = """
-            macOS also uses 3-finger swipes for Mission Control and switching \
-            full-screen apps. For clean tab switching, set those to four fingers:
-
-            System Settings → Trackpad → More Gestures → set "Swipe between \
-            full-screen applications" and "Mission Control" to Four Fingers.
-
-            If you use three-finger drag (Accessibility → Pointer Control), \
-            consider turning it off — it conflicts with this gesture.
-            """
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "TabSwipe is running"
+        alert.informativeText =
+            "It lives in your menu bar. There is no window — the icon up there is the whole interface."
+        alert.accessoryView = Self.welcomeAccessoryView(startsAtLogin: startsAtLogin)
         alert.addButton(withTitle: "Open Trackpad Settings")
         alert.addButton(withTitle: "Done")
 
@@ -158,6 +192,86 @@ class AppDelegate: NSObject, NSApplicationDelegate {
            let url = URL(string: "x-apple.systempreferences:com.apple.Trackpad-Settings.extension") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// The body of the welcome dialog. NSAlert only offers two flat strings, so
+    /// anything with structure has to be an accessory view.
+    private static func welcomeAccessoryView(startsAtLogin: Bool) -> NSView {
+        let width: CGFloat = 380
+        let body = NSMutableAttributedString()
+
+        let titleStyle = NSMutableParagraphStyle()
+        titleStyle.paragraphSpacingBefore = 14
+
+        let textStyle = NSMutableParagraphStyle()
+        textStyle.lineSpacing = 2
+
+        func section(_ title: String, _ text: String) {
+            if body.length == 0 { titleStyle.paragraphSpacingBefore = 0 }
+            body.append(NSAttributedString(string: title + "\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: titleStyle.copy(),
+            ]))
+            titleStyle.paragraphSpacingBefore = 14
+            body.append(NSAttributedString(string: text + "\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: textStyle,
+            ]))
+        }
+
+        section(
+            "Swipe to switch tabs",
+            "Three fingers left or right, anywhere on the trackpad, moves Chrome "
+                + "one tab. Chrome does not need to be focused for the swipe to land."
+        )
+
+        section(
+            "Give macOS four fingers",
+            "macOS claims three-finger swipes for Mission Control and for moving "
+                + "between full-screen apps, so until you change those, both fire at "
+                + "once. Under More Gestures, set them to Four Fingers. Three-finger "
+                + "drag, in Accessibility → Pointer Control, conflicts too."
+        )
+
+        section(
+            "Tune it from the menu",
+            "Swipe Distance sets how far your fingers travel per tab — 1 is a flick, "
+                + "10 is a long drag. Direction picks which way counts as forward. "
+                + "Enabled pauses the gesture without quitting."
+        )
+
+        section(
+            startsAtLogin ? "Starts with your Mac" : "Starting with your Mac",
+            startsAtLogin
+                ? "TabSwipe has added itself to your login items, so it is back "
+                    + "after a restart. Turn that off any time from the menu."
+                : "Switch on Start at Login from the menu and TabSwipe will be "
+                    + "back after a restart."
+        )
+
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.attributedStringValue = body
+        label.isSelectable = false
+        label.preferredMaxLayoutWidth = width
+
+        // NSAlert insets its own two labels 8pt further in than it places an
+        // accessory view, so the text is indented to match rather than sitting
+        // proud of the title above it. The container keeps the full width —
+        // widening it would make the alert itself wider and re-centre
+        // everything.
+        let leftInset: CGFloat = 4
+        let textWidth = width - leftInset
+        label.preferredMaxLayoutWidth = textWidth
+
+        let height = label.sizeThatFits(
+            NSSize(width: textWidth, height: .greatestFiniteMagnitude)).height
+        label.frame = NSRect(x: leftInset, y: 8, width: textWidth, height: height)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height + 8))
+        container.addSubview(label)
+        return container
     }
 
     // MARK: - Status Item
