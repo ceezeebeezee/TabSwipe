@@ -23,6 +23,8 @@ struct TabSwipeApp {
 /// always reflects live permission/settings state), and the two one-time
 /// onboarding flows — the Accessibility grant and the trackpad-gesture tip.
 class AppDelegate: NSObject, NSApplicationDelegate {
+    static let websiteURL = URL(string: "https://czbz.ai/tabswipe")
+
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
     private var accessibilityCheckTimer: Timer?
@@ -220,6 +222,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        // About
+        let aboutItem = NSMenuItem(title: "About TabSwipe", action: #selector(showAbout(_:)), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
         // Quit
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit(_:)), keyEquivalent: "q")
         quitItem.target = self
@@ -271,6 +278,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if alert.runModal() == .alertFirstButtonReturn {
             statusItem.isVisible = false
+        }
+    }
+
+    @objc private func showAbout(_ sender: NSMenuItem) {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let copyright = info?["NSHumanReadableCopyright"] as? String
+            ?? "Copyright 2026 Caesar Sengupta"
+
+        let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "TabSwipe \(version)"
+        alert.informativeText = """
+            Swipe three fingers on your trackpad to move between Chrome tabs.
+
+            By Caesar Sengupta
+            \(copyright)
+            """
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Visit Website")
+
+        // LSUIElement apps are not frontmost when their menu is clicked, so the
+        // alert would otherwise open behind whatever the user was looking at.
+        NSApp.activate(ignoringOtherApps: true)
+
+        if alert.runModal() == .alertSecondButtonReturn, let url = Self.websiteURL {
+            NSWorkspace.shared.open(url)
         }
     }
 

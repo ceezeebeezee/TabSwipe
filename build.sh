@@ -60,6 +60,10 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <true/>
     <key>CFBundleIconFile</key>
     <string>TabSwipe</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright 2026 Caesar Sengupta. Licensed under Apache 2.0.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
