@@ -80,6 +80,18 @@ rm -rf "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Headers" \
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
     "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null
 
+# swiftc bakes in an LC_RPATH into the Command Line Tools' Swift libs
+# (/Library/Developer/CommandLineTools/.../swift-*/macosx). On our macOS 13+
+# deployment target the Swift runtime ships in the OS at /usr/lib/swift, so
+# that dev-toolchain path is dead weight in a shipped binary — strip it. Match
+# dynamically because the swift-x.y version in the path moves with the toolchain.
+otool -l "$APP_BUNDLE/Contents/MacOS/$APP_NAME" \
+    | awk '/LC_RPATH/{c=2} c&&/ path /{print $2; c=0}' \
+    | grep '/Library/Developer/CommandLineTools' \
+    | while read -r rp; do
+        install_name_tool -delete_rpath "$rp" "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null
+    done
+
 # Unquoted heredoc: $VERSION and the Sparkle settings are interpolated.
 cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -133,6 +145,16 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
          timer inside TabSwipe's own process. -->
     <key>SUAllowsAutomaticUpdates</key>
     <false/>
+    <!-- Sign the update feed itself, not just the payload. Without this a
+         czbz.ai compromise could serve tampered release-notes HTML (rendered
+         in a WebView) and altered version metadata; with it, the appcast and
+         release notes must carry a valid EdDSA signature or the update is
+         refused. SUVerifyUpdateBeforeExtraction is a required companion.
+         Publish with generate_appcast, which signs the feed automatically. -->
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>
 PLIST
@@ -288,14 +310,35 @@ echo "Creating $ZIP_NAME (Sparkle update archive)..."
 rm -f "$ZIP_NAME"
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_NAME"
 
-SIGN_UPDATE="$SCRATCH/artifacts/sparkle/Sparkle/bin/sign_update"
-if [ -x "$SIGN_UPDATE" ]; then
+# --- Generate the SIGNED appcast ---
+# The app sets SURequireSignedFeed, so a hand-pasted enclosure signature is no
+# longer enough: the feed and release notes must be signed too. generate_appcast
+# does all of it — it reads SURequireSignedFeed from the app inside the zip and
+# signs the appcast + embedded release notes with the same EdDSA key. It writes
+# appcast.xml into its input directory, so stage the zip alone in dist/.
+GENERATE_APPCAST="$SCRATCH/artifacts/sparkle/Sparkle/bin/generate_appcast"
+DIST="dist"
+if [ -x "$GENERATE_APPCAST" ]; then
     echo ""
-    echo "Appcast entry — paste into czbz/tabswipe/appcast.xml:"
-    echo "   version $VERSION, published $(date -u '+%a, %d %b %Y %H:%M:%S +0000')"
-    "$SIGN_UPDATE" "$ZIP_NAME" | sed 's/^/   /'
+    echo "Generating signed appcast..."
+    rm -rf "$DIST"
+    mkdir -p "$DIST"
+    cp "$ZIP_NAME" "$DIST/"
+    # Release notes: same basename as the zip, embedded as CDATA (no <body>).
+    if [ -f "release-notes/$VERSION.html" ]; then
+        cp "release-notes/$VERSION.html" "$DIST/${APP_NAME}-${VERSION}.html"
+    fi
+    "$GENERATE_APPCAST" \
+        --download-url-prefix "https://czbz.ai/tabswipe/" \
+        --embed-release-notes \
+        --link "https://czbz.ai/tabswipe" \
+        -o "$DIST/appcast.xml" \
+        "$DIST"
+    echo "✓ Signed appcast at $DIST/appcast.xml"
+    echo "  Publish: copy $DIST/appcast.xml and $ZIP_NAME (and $DMG_NAME) to"
+    echo "  czbz/tabswipe/, then deploy."
 else
-    echo "⚠ sign_update not found; cannot sign the update archive."
+    echo "⚠ generate_appcast not found; cannot produce a signed appcast."
 fi
 
 # --- Verify what Gatekeeper will actually see ---
