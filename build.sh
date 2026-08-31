@@ -237,38 +237,12 @@ DMG_STAGING="/tmp/TabSwipe-dmg"
 rm -rf "$DMG_STAGING" "$DMG_NAME"
 mkdir -p "$DMG_STAGING"
 
+# The disk image holds the app and nothing else — no Applications symlink to
+# drag onto and no readme. Opening TabSwipe from the mounted image is the
+# install: it copies itself to /Applications, reopens from there, and then
+# walks the user through the trackpad settings and the Accessibility grant.
+# A symlink here would just offer a second, worse path to the same place.
 cp -R "$APP_BUNDLE" "$DMG_STAGING/"
-ln -s /Applications "$DMG_STAGING/Applications"
-
-cat > "$DMG_STAGING/FIRST TIME SETUP.txt" << 'README'
-TabSwipe — 3-Finger Tab Switch for Chrome
-==========================================
-
-INSTALL:
-  Drag TabSwipe.app to the Applications folder.
-
-FIRST RUN:
-  Open TabSwipe from Applications (or Spotlight).
-  Grant Accessibility permission when prompted.
-  The 3-finger icon will appear in your menu bar.
-
-IMPORTANT — TRACKPAD SETTINGS:
-  macOS also uses 3-finger swipes for Mission Control and switching
-  full-screen apps. Set those to FOUR fingers so they don't clash:
-  System Settings → Trackpad → More Gestures →
-    "Swipe between full-screen applications" → Four Fingers
-    "Mission Control" → Four Fingers
-
-HOW IT WORKS:
-  3-finger swipe left/right on your trackpad to switch Chrome tabs.
-  Click the menu bar icon to adjust swipe distance and direction.
-
-UNINSTALL:
-  Click the menu bar icon and choose "Uninstall TabSwipe".
-  It removes the login item and its settings, moves itself
-  to the Trash, and shows you where to clear its leftover
-  Accessibility permission.
-README
 
 hdiutil create -volname "TabSwipe" \
     -srcfolder "$DMG_STAGING" \
@@ -341,8 +315,8 @@ if [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ] && [ "$APP_NOTA
     echo "  🎉 Ready for distribution!"
     echo ""
     echo "  Both the app and the disk image are notarized and stapled."
-    echo "  Send $DMG_NAME to anyone - they double-click to open, drag"
-    echo "  TabSwipe to Applications, no warnings, no terminal, works offline."
+    echo "  Send $DMG_NAME to anyone - they open it, double-click TabSwipe,"
+    echo "  and it installs itself. No warnings, no terminal, works offline."
 elif [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ]; then
     echo "  DMG notarized, but the app bundle was not stapled."
     echo "  Users on a machine with no network may still see a warning."

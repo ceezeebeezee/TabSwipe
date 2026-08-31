@@ -11,6 +11,15 @@ struct TabSwipeApp {
     static let delegate = AppDelegate()
 
     static func main() {
+        // macOS 26 decorates menu items it recognises with its own symbols —
+        // "About" picks up an ⓘ. There is a global switch for this, but that
+        // is the user's setting to make, not ours. Writing it into the
+        // argument domain instead scopes it to this process: highest priority,
+        // in memory only, nothing left behind in anyone's preferences.
+        var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments["NSMenuEnableActionImages"] = false
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+
         let app = NSApplication.shared
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
@@ -59,6 +68,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var updaterController: SPUStandardUpdaterController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First, before anything else touches the menu bar or asks for
+        // Accessibility: if this offers to move the app it never returns.
+        // Granting Accessibility to a copy that is about to move would waste
+        // the grant, since macOS keys it to where the bundle lives.
+        offerToInstallIfNeeded()
+
         // Before the menu is built: the Check for Updates item targets it.
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
@@ -147,26 +162,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The menu bar glyph: the same mark as the app icon and the website —
+    /// three fingers with their bottoms aligned, the middle one reaching
+    /// higher, over the trackpad they swipe across. Drawn as round-capped
+    /// strokes rather than filled rectangles so it matches at this size.
+    ///
+    /// Template images are tinted from their alpha channel, which is what lets
+    /// the fainter bar stay fainter in both light and dark menu bars.
     private func threeFingerIcon() -> NSImage {
         let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size, flipped: false) { rect in
-            NSColor.black.setFill()
-
-            let fingerWidth: CGFloat = 3.2
-            let fingerRadius: CGFloat = fingerWidth / 2
-            let gap: CGFloat = 1.6
-            let totalWidth = 3 * fingerWidth + 2 * gap
-            let startX = (rect.width - totalWidth) / 2
-            let heights: [CGFloat] = [10, 12, 10]
-            let bottomY: CGFloat = 2.5
-
-            for i in 0..<3 {
-                let x = startX + CGFloat(i) * (fingerWidth + gap)
-                let h = heights[i]
-                let y = bottomY + (12 - h) / 2
-                let fingerRect = NSRect(x: x, y: y, width: fingerWidth, height: h)
-                NSBezierPath(roundedRect: fingerRect, xRadius: fingerRadius, yRadius: fingerRadius).fill()
+        let image = NSImage(size: size, flipped: false) { _ in
+            func stroke(from a: NSPoint, to b: NSPoint, width: CGFloat, alpha: CGFloat) {
+                let path = NSBezierPath()
+                path.move(to: a)
+                path.line(to: b)
+                path.lineWidth = width
+                path.lineCapStyle = .round
+                NSColor.black.withAlphaComponent(alpha).setStroke()
+                path.stroke()
             }
+
+            let bottom: CGFloat = 7.6
+            stroke(from: NSPoint(x: 5.6, y: bottom), to: NSPoint(x: 5.6, y: 13.4), width: 2.4, alpha: 1)
+            stroke(from: NSPoint(x: 9.0, y: bottom), to: NSPoint(x: 9.0, y: 15.4), width: 2.4, alpha: 1)
+            stroke(from: NSPoint(x: 12.4, y: bottom), to: NSPoint(x: 12.4, y: 13.4), width: 2.4, alpha: 1)
+            stroke(from: NSPoint(x: 3.4, y: 4.4), to: NSPoint(x: 14.6, y: 4.4), width: 1.8, alpha: 0.45)
             return true
         }
         image.isTemplate = true
@@ -177,6 +197,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() {
         menu = NSMenu()
+        // Without this every row is indented by the checkmark gutter, because
+        // one item somewhere in the menu has state. The two items that need to
+        // show state carry it in their titles instead. Submenus keep their own
+        // state columns, so the tick still marks the chosen distance and
+        // direction where a genuine choice is being made.
+        menu.showsStateColumn = false
         menu.delegate = self
         statusItem.menu = menu
     }
@@ -200,9 +226,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Enabled toggle
-        let enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled(_:)), keyEquivalent: "")
+        let enabledItem = NSMenuItem(
+            title: settings.isEnabled ? "Enabled ✓" : "Enabled",
+            action: #selector(toggleEnabled(_:)), keyEquivalent: "")
         enabledItem.target = self
-        enabledItem.state = settings.isEnabled ? .on : .off
         menu.addItem(enabledItem)
 
         menu.addItem(.separator())
@@ -246,9 +273,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // Start at Login
-        let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
+        let startsAtLogin = SMAppService.mainApp.status == .enabled
+        let loginItem = NSMenuItem(
+            title: startsAtLogin ? "Start at Login ✓" : "Start at Login",
+            action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
         loginItem.target = self
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(loginItem)
 
         // Hide from Menu Bar (until relaunch)
@@ -363,6 +392,123 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertSecondButtonReturn, let url = Self.websiteURL {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: - First run
+
+    /// The installer. The disk image ships the app alone, with no Applications
+    /// symlink to drag onto, so opening TabSwipe from the mounted image lands
+    /// here and this is what actually installs it. Does not return if the user
+    /// accepts: the installed copy is relaunched and this process exits.
+    private func offerToInstallIfNeeded() {
+        let fm = FileManager.default
+        let bundleURL = Bundle.main.bundleURL
+        let path = bundleURL.path
+
+        let installed = ["/Applications", NSHomeDirectory() + "/Applications"]
+            .contains { path.hasPrefix($0 + "/") }
+        guard !installed else { return }
+
+        let declinedKey = "declinedInstall"
+        guard !UserDefaults.standard.bool(forKey: declinedKey) else { return }
+
+        // Opening an app straight off a disk image runs it from a throwaway
+        // read-only copy somewhere under /private/var — Gatekeeper's path
+        // randomisation. Printing that path would mean nothing to anyone, so
+        // describe the situation instead of the location.
+        let isTranslocated = path.contains("/AppTranslocation/")
+        let isReadOnly = (try? bundleURL.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?
+            .volumeIsReadOnly ?? false
+        let origin = (isTranslocated || isReadOnly)
+            ? "TabSwipe is running from its disk image."
+            : "TabSwipe is running from \(bundleURL.deletingLastPathComponent().path)."
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "Install TabSwipe?"
+        alert.informativeText = """
+            \(origin)
+
+            It will copy itself to your Applications folder and reopen from \
+            there. Run from anywhere else it cannot update itself, and macOS \
+            drops its Accessibility permission as soon as the disk image is \
+            ejected.
+            """
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Not Now")
+        alert.buttons[1].keyEquivalent = "\u{1b}"
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            UserDefaults.standard.set(true, forKey: declinedKey)
+            return
+        }
+
+        let destination = URL(fileURLWithPath: "/Applications")
+            .appendingPathComponent(bundleURL.lastPathComponent)
+
+        // ditto rather than FileManager.copyItem: this bundle contains a
+        // versioned framework whose signature depends on its symlink farm,
+        // and ditto is the tool that reproduces bundles faithfully. Copy
+        // rather than move — the source is often a read-only disk image.
+        // An already-installed copy that is running would carry on from a
+        // deleted bundle and then fight the relaunched one for the same
+        // trackpad gestures, so retire it before overwriting.
+        if let id = Bundle.main.bundleIdentifier {
+            for other in NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            where other != .current {
+                other.terminate()
+            }
+        }
+
+        if fm.fileExists(atPath: destination.path) {
+            try? fm.removeItem(at: destination)
+        }
+        let copy = Process()
+        copy.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        copy.arguments = [path, destination.path]
+        do {
+            try copy.run()
+            copy.waitUntilExit()
+        } catch {
+            Log.error("Move to Applications: ditto failed to start: \(error)")
+        }
+
+        guard copy.terminationStatus == 0, fm.fileExists(atPath: destination.path) else {
+            let failure = NSAlert()
+            failure.alertStyle = .warning
+            failure.messageText = "Could not install TabSwipe"
+            failure.informativeText = """
+                Copying into /Applications failed. Drag TabSwipe there yourself, \
+                then open it again.
+                """
+            failure.runModal()
+            return
+        }
+
+        // The copy inherits the download's quarantine flag, which would make
+        // the relaunch look like a fresh untrusted download.
+        let unquarantine = Process()
+        unquarantine.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        unquarantine.arguments = ["-d", "-r", "com.apple.quarantine", destination.path]
+        try? unquarantine.run()
+        unquarantine.waitUntilExit()
+
+        // Relaunch via a detached shell that waits for this process to die
+        // first. Opening immediately would leave two instances briefly fighting
+        // over the same trackpad gestures.
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = [
+            "-c",
+            "while /bin/kill -0 \(getpid()) 2>/dev/null; do /bin/sleep 0.1; done; "
+                + "/usr/bin/open \"\(destination.path)\"",
+        ]
+        try? relaunch.run()
+
+        Log.info("Moved to \(destination.path); relaunching")
+        exit(0)
     }
 
     @objc private func uninstall(_ sender: NSMenuItem) {
