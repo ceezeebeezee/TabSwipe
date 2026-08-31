@@ -9,13 +9,21 @@ DMG_NAME="$APP_NAME.dmg"
 TEAM_ID="GFJX8GLA7X"
 NOTARIZE_PROFILE="TabSwipe-Notarize"
 
+# ~/Projects is inside a Google Drive synced folder. Drive's virtual filesystem
+# does not honour SQLite's locking and fsync guarantees, so SwiftPM's build.db
+# intermittently fails with "disk I/O error" and freshly linked binaries fail to
+# materialise. Keep every byte of build state on real local disk, outside the
+# synced tree. (Also stops Drive uploading thousands of object files per build.)
+SCRATCH="$HOME/Library/Caches/TabSwipe-build"
+mkdir -p "$SCRATCH"
+
 echo "Running tests..."
-swift run -c release TabSwipeTests
+swift run -c release --scratch-path "$SCRATCH" TabSwipeTests
 
 echo "Building $APP_NAME..."
-swift build -c release --product TabSwipe
+swift build -c release --scratch-path "$SCRATCH" --product TabSwipe
 
-BUILD_DIR=$(swift build -c release --product TabSwipe --show-bin-path)
+BUILD_DIR=$(swift build -c release --scratch-path "$SCRATCH" --product TabSwipe --show-bin-path)
 
 echo "Creating $APP_BUNDLE..."
 rm -rf "$APP_BUNDLE"
@@ -58,6 +66,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+echo "Architectures in the built binary:"
+lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | sed 's/^/   /'
+
 # --- Sign the app ---
 # Prefer Developer ID Application certificate (for distribution)
 # Fall back to self-signed cert (for local dev)
@@ -88,14 +99,53 @@ else
     echo "  certificate named 'TabSwipe Signing' in Keychain Access."
 fi
 
-# --- Create DMG ---
+# --- Notarization setup ---
+NOTARY_READY="no"
+if [ "$SIGN_MODE" = "developer-id" ]; then
+    if xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 2>&1; then
+        NOTARY_READY="yes"
+    else
+        echo ""
+        echo "⚠ Notary credentials not found in keychain."
+        echo "  Set up with: xcrun notarytool store-credentials \"$NOTARIZE_PROFILE\" \\"
+        echo "                  --apple-id <your-apple-id> --team-id $TEAM_ID"
+    fi
+fi
+
+# --- Notarize the app, then staple the ticket INTO the bundle ---
+# Stapling only the DMG leaves the app unverifiable offline once a user has
+# dragged it out to /Applications: the ticket lives on the disk image, not in
+# the thing they actually run. Notarizing a zip of the bundle lets us staple
+# the ticket into TabSwipe.app itself, before it is packaged.
+APP_NOTARIZED="skipped"
+if [ "$NOTARY_READY" = "yes" ]; then
+    echo ""
+    echo "Notarizing $APP_BUNDLE (this can take 1-10 minutes)..."
+    ZIP_PATH="/tmp/$APP_NAME-notarize.zip"
+    rm -f "$ZIP_PATH"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+
+    if xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARIZE_PROFILE" --wait; then
+        xcrun stapler staple "$APP_BUNDLE"
+        xcrun stapler validate "$APP_BUNDLE"
+        APP_NOTARIZED="yes"
+        echo "✓ Ticket stapled into $APP_BUNDLE"
+    else
+        APP_NOTARIZED="failed"
+        echo "⚠ App notarization failed. For details:"
+        echo "   xcrun notarytool submit $ZIP_PATH --keychain-profile $NOTARIZE_PROFILE --wait --verbose"
+    fi
+    rm -f "$ZIP_PATH"
+fi
+
+# --- Create DMG (now containing the stapled app) ---
 echo ""
 echo "Creating $DMG_NAME..."
 DMG_STAGING="/tmp/TabSwipe-dmg"
 rm -rf "$DMG_STAGING" "$DMG_NAME"
 mkdir -p "$DMG_STAGING"
 
-cp -r "$APP_BUNDLE" "$DMG_STAGING/"
+cp -R "$APP_BUNDLE" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"
 
 cat > "$DMG_STAGING/FIRST TIME SETUP.txt" << 'README'
@@ -142,33 +192,30 @@ fi
 DMG_SIZE=$(du -h "$DMG_NAME" | cut -f1 | xargs)
 echo "✓ Created $DMG_NAME ($DMG_SIZE)"
 
-# --- Notarize and Staple (Developer ID only) ---
-if [ "$SIGN_MODE" = "developer-id" ]; then
-    # Check if notary credentials are stored
-    if xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 2>&1; then
-        echo ""
-        echo "Submitting to Apple for notarization (this can take 1-10 minutes)..."
-
-        if xcrun notarytool submit "$DMG_NAME" \
-            --keychain-profile "$NOTARIZE_PROFILE" \
-            --wait; then
-            echo ""
-            echo "Stapling notarization ticket..."
-            xcrun stapler staple "$DMG_NAME"
-            xcrun stapler validate "$DMG_NAME"
-            NOTARIZED="yes"
-        else
-            echo "⚠ Notarization failed. Run with verbose for details:"
-            echo "   xcrun notarytool submit $DMG_NAME --keychain-profile $NOTARIZE_PROFILE --wait --verbose"
-            NOTARIZED="failed"
-        fi
+# --- Notarize and staple the DMG itself ---
+# Second submission: the disk image is a separate artifact from the app and
+# needs its own ticket, so Gatekeeper clears it at mount time.
+NOTARIZED="skipped"
+if [ "$NOTARY_READY" = "yes" ]; then
+    echo ""
+    echo "Notarizing $DMG_NAME..."
+    if xcrun notarytool submit "$DMG_NAME" --keychain-profile "$NOTARIZE_PROFILE" --wait; then
+        xcrun stapler staple "$DMG_NAME"
+        xcrun stapler validate "$DMG_NAME"
+        NOTARIZED="yes"
     else
-        echo ""
-        echo "⚠ Notary credentials not found in keychain."
-        echo "  Set up with: xcrun notarytool store-credentials \"$NOTARIZE_PROFILE\" \\"
-        echo "                  --apple-id <your-apple-id> --team-id $TEAM_ID --password <app-specific-pw>"
-        NOTARIZED="skipped"
+        NOTARIZED="failed"
+        echo "⚠ DMG notarization failed. For details:"
+        echo "   xcrun notarytool submit $DMG_NAME --keychain-profile $NOTARIZE_PROFILE --wait --verbose"
     fi
+fi
+
+# --- Verify what Gatekeeper will actually see ---
+if [ "$SIGN_MODE" = "developer-id" ]; then
+    echo ""
+    echo "Verification:"
+    codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" 2>&1 | sed 's/^/   /'
+    spctl -a -t exec -vvv "$APP_BUNDLE" 2>&1 | sed 's/^/   /' || true
 fi
 
 # --- Summary ---
@@ -176,21 +223,24 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-if [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ]; then
+if [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ] && [ "$APP_NOTARIZED" = "yes" ]; then
     echo "  🎉 Ready for distribution!"
     echo ""
-    echo "  Send $DMG_NAME to anyone — they double-click to open,"
-    echo "  drag TabSwipe to Applications, no warnings, no terminal."
+    echo "  Both the app and the disk image are notarized and stapled."
+    echo "  Send $DMG_NAME to anyone - they double-click to open, drag"
+    echo "  TabSwipe to Applications, no warnings, no terminal, works offline."
+elif [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ]; then
+    echo "  DMG notarized, but the app bundle was not stapled."
+    echo "  Users on a machine with no network may still see a warning."
 elif [ "$SIGN_MODE" = "developer-id" ]; then
-    echo "  ✓ Signed with Developer ID, but not notarized."
-    echo "  Friends will see a Gatekeeper warning until notarization is set up."
+    echo "  Signed with Developer ID, but not notarized."
+    echo "  Recipients will see a Gatekeeper warning until notarization runs."
 else
     echo "  For yourself:"
-    echo "    cp -r $APP_BUNDLE /Applications/"
+    echo "    cp -R $APP_BUNDLE /Applications/"
     echo ""
     echo "  For friends (with $SIGN_MODE signing):"
-    echo "    They'll need to right-click → Open on first launch."
-    echo "    For seamless distribution, get an Apple Developer ID."
+    echo "    They'll need to right-click > Open on first launch."
 fi
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

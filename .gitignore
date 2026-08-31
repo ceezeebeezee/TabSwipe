@@ -3,3 +3,4 @@
 *.app/
 TabSwipe.dmg
 .claude/settings.local.json
+setup-signing.sh
