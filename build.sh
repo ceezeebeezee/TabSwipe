@@ -283,12 +283,30 @@ exit 0
 POST
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-pkgbuild --component "$APP_BUNDLE" \
+# pkgbuild defaults to BundleIsRelocatable=true: Installer asks LaunchServices
+# for an existing copy of the bundle and "updates" it wherever it lives — a dev
+# checkout, the Trash, anywhere — instead of installing to /Applications. That
+# is exactly wrong for us (uninstall + reinstall found a stray copy and put the
+# app there, so nothing landed in /Applications and postinstall opened air).
+# --analyze only works on a --root, so stage the app alone, generate the
+# component plist, force the flag off, and build from that root.
+PKG_ROOT="/tmp/TabSwipe-pkgroot"
+COMPONENT_PLIST="/tmp/TabSwipe-component.plist"
+rm -rf "$PKG_ROOT" "$COMPONENT_PLIST"
+mkdir -p "$PKG_ROOT"
+ditto "$APP_BUNDLE" "$PKG_ROOT/$APP_BUNDLE"
+
+pkgbuild --analyze --root "$PKG_ROOT" "$COMPONENT_PLIST" >/dev/null
+/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$COMPONENT_PLIST"
+
+pkgbuild --root "$PKG_ROOT" \
+         --component-plist "$COMPONENT_PLIST" \
          --scripts "$PKG_SCRIPTS" \
          --identifier "com.tabswipe.app.pkg" \
          --version "$VERSION" \
          --install-location "/Applications" \
          "$COMPONENT_PKG" >/dev/null
+rm -rf "$PKG_ROOT" "$COMPONENT_PLIST"
 
 # Packages are signed with productsign/productbuild and a Developer ID
 # *Installer* identity — a different certificate from the Application one used
