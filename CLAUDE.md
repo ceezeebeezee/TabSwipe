@@ -48,43 +48,70 @@ request. `build.sh` prints `lipo -archs` before signing.
 
 ## Releasing
 
-`build.sh` needs a Developer ID Application certificate and a notarytool
-keychain profile named `TabSwipe-Notarize`. It runs tests, builds, assembles
-the bundle, embeds and signs Sparkle, signs and notarizes the app, staples it,
-builds and notarizes the DMG, then writes `TabSwipe-<version>.zip` — the
-archive Sparkle downloads, which is _not_ the DMG — and prints its EdDSA
-signature and length.
+Distribution is a signed **installer package**, not a disk image. Installer.app
+places the app, a postinstall launches it, and — because a package does not set
+the quarantine flag on what it installs — the user never sees Gatekeeper's
+"downloaded from the Internet" dialog. Updates are separate: Sparkle downloads
+`TabSwipe-<version>.zip` and swaps the bundle in place; nobody gets an
+installer for an update.
 
-A release spans two repos: this one and the site repo that serves
-`czbz.ai/tabswipe/`.
+`build.sh` needs, in the login keychain:
 
-1. Bump `VERSION` at the top of `build.sh`. It is the single source for both
-   plist version keys and what Sparkle compares against the appcast.
-2. Run `./build.sh` and keep the printed `edSignature` and `length`.
-3. Copy the DMG and the zip into the site repo's `tabswipe/` directory.
-4. Update the `<enclosure>` in `tabswipe/appcast.xml` with that signature and
-   length.
-5. **Re-sign the feed**: `sign_update tabswipe/appcast.xml`. Sparkle's tools
-   live under
+- a **Developer ID Application** certificate (codesigns the app),
+- a **Developer ID Installer** certificate (productsigns the pkg — a different
+  certificate type; the current one expires **2027-02-01**, and packages
+  already notarized keep working after expiry, but new releases need renewal),
+- a notarytool profile named `TabSwipe-Notarize` (if it goes missing, only the
+  user can recreate it — it needs their Apple ID and an app-specific password:
+  `xcrun notarytool store-credentials "TabSwipe-Notarize" --apple-id … --team-id GFJX8GLA7X`).
+
+The script runs tests, builds, embeds and signs Sparkle, notarizes and staples
+the app, builds/signs/notarizes/staples `TabSwipe.pkg`, writes the update zip,
+and generates a **signed appcast** at `dist/appcast.xml` via `generate_appcast`
+(release notes come from `release-notes/<version>.html`, embedded into the
+feed).
+
+A release spans two repos — this one and the site repo serving
+`czbz.ai/tabswipe/`:
+
+1. Bump `VERSION` at the top of `build.sh` (single source for both plist
+   version keys and the appcast comparison). Add
+   `release-notes/<version>.html`.
+2. Run `./build.sh`.
+3. Copy `TabSwipe.pkg`, `TabSwipe-<version>.zip` and `dist/appcast.xml` into
+   the site repo's `tabswipe/` directory. `chmod 644` the copies.
+4. Update the hardcoded download size in `tabswipe/index.html`.
+5. Commit both repos and deploy the site.
+6. Verify against the **live** site, not the local copy: download the pkg from
+   `czbz.ai`, set a quarantine xattr, and check `spctl -a -t install` accepts
+   it; fetch the appcast and zip and run
+   `sign_update --verify <zip> <signature>` with the enclosure signature.
+   Sparkle's tools live under
    `~/Library/Caches/TabSwipe-build/artifacts/sparkle/Sparkle/bin/`.
-6. Update the hardcoded download size in `tabswipe/index.html`.
-7. Commit both repos and deploy the site.
-8. Verify against the live site, not the local copy: fetch the appcast and zip
-   from `czbz.ai`, check the declared length matches the served bytes, and run
-   `sign_update --verify <zip> <signature>`.
 
-### Step 5 is the one that breaks silently
+### Never hand-edit appcast.xml
 
-The app sets `SURequireSignedFeed`, so `appcast.xml` carries its own signature
-in a trailer comment as well as the per-payload one. **Any** edit invalidates
-that trailer and Sparkle then refuses the whole feed. Nothing fails on the
-publishing side — the build succeeds, the deploy succeeds, and updates just
-stop working for everyone. Re-sign after every edit.
+The app sets `SURequireSignedFeed`: the feed carries its own EdDSA signature in
+a trailer comment, and **any** edit invalidates it — Sparkle then refuses the
+whole feed and updates stop for everyone, with nothing failing on the
+publishing side. The appcast is generated and signed by `build.sh`; to change
+it, change the inputs (release notes, version) and rebuild.
 
 The private signing key is in the login keychain and is backed up. Losing it
 means never shipping an update again, because installed copies only accept
 what verifies against the public key compiled into them. Export with
 `generate_keys -x`, import with `-f`. Do not regenerate or rotate it.
+
+### Testing an update end to end
+
+Copy the built `TabSwipe.app` to `/tmp/updtest/`, patch both version keys to
+`0.9` and _remove_ `SUAllowsAutomaticUpdates` with plutil, re-sign the outer
+bundle, then `defaults write com.tabswipe.app SUEnableAutomaticChecks -bool YES`,
+`SUAutomaticallyUpdate -bool YES`, `SUHasLaunchedBefore -bool YES` and launch.
+It checks the live feed within ~15 s, stages silently, and installs on quit —
+verify the on-disk bundle became the new version. This exercises every stage
+except the "Install and Relaunch" button UI. Snapshot/restore the defaults
+domain around the test, and clean up `~/Library/Caches/com.tabswipe.app*`.
 
 ## Gotchas
 
@@ -102,6 +129,31 @@ survive and its signature still validates), strip the XPC services (they exist
 for sandboxed apps, which we cannot be), add the `@executable_path/../Frameworks`
 rpath SwiftPM omits, and sign inside-out — framework first, app last, because
 signing a bundle seals the hashes of everything already inside it.
+
+**The package must stay non-relocatable.** `pkgbuild` defaults
+`BundleIsRelocatable` to true, which makes Installer ask LaunchServices for an
+existing copy of the bundle and "update" it wherever it lives — a dev checkout,
+the Trash — instead of installing to /Applications. Uninstall + reinstall hit
+exactly this: the payload landed in the project directory as root and
+/Applications got nothing. `build.sh` stages the app alone, generates the
+component plist with `--analyze`, and forces the flag off; when touching the
+packaging, verify the expanded pkg's PackageInfo says `relocatable="false"`.
+Corollary: launching the build-directory copy directly (Spotlight finds it) is
+how you get the LetsMove move-to-Applications dialog — that is correct
+behaviour, not a bug.
+
+**The pkg postinstall must drop to the console user before launching.** The
+installer runs as root; a bare `open` there would run TabSwipe as root, put its
+preferences in root's home, and record the login item and Accessibility grant
+against the wrong user. It uses `launchctl asuser` with the owner of
+`/dev/console`.
+
+**LetsMove's dialog copy is ours, not upstream's.** The defaults in
+`LetsMove/PFMoveApplication.m` (first person, no app name, password warning up
+front) were replaced in the `#define`s at the top. The dialog is a safety net
+only — the pkg always installs to /Applications — so it fires exactly when the
+app runs from an odd location. Keep the rewritten strings if the vendored copy
+is ever refreshed from upstream.
 
 **The Accessibility grant is keyed to the code-signing identity**, not the
 path. With a stable Developer ID, replacing the app in `/Applications` keeps
@@ -137,12 +189,15 @@ not revoke the certificate.
 
 ## Website
 
-The download page, terms, DMG, update zip and appcast live in the site repo
-under `tabswipe/`. Two things there drift silently and need updating with the
-app: the hardcoded download size, and `menu.svg`, which is a hand-drawn
-illustration of the menu — change the menu, redraw it. The SVGs are
-illustrations rather than screenshots because `LSUIElement` apps are invisible
-to macOS's app-access resolver and cannot be captured.
+The download page, terms, `TabSwipe.pkg`, update zip and appcast live in the
+site repo under `tabswipe/`. The download link is dispensed by an email-gate
+script in `index.html` whose `PKG` variable holds the path — keep it and the
+plain fallback link in sync if the artifact name ever changes. Two things there
+drift silently and need updating with the app: the hardcoded download size, and
+`menu.svg`, which is a hand-drawn illustration of the menu — change the menu,
+redraw it. The SVGs are illustrations rather than screenshots because
+`LSUIElement` apps are invisible to macOS's app-access resolver and cannot be
+captured.
 
 The privacy section makes specific factual claims about what the app sends.
 It was rewritten when Sparkle landed, because "contains no networking code at
