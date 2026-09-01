@@ -37,14 +37,14 @@ download, signed with a Developer ID certificate and notarized by Apple.
 
 ## Layout
 
-| Path | What |
-| --- | --- |
-| `Sources/MultitouchSupport.swift` | Runtime binding to the private framework |
-| `Sources/SwipeDetector.swift` | Turns contact frames into swipe events |
-| `Sources/GestureEngine.swift` | Device lifecycle, sleep/wake recovery, keystroke output |
-| `Sources/Settings.swift` | UserDefaults-backed preferences |
-| `App/App.swift` | Menu bar UI and permission prompts |
-| `Tests/TabSwipeTests.swift` | Standalone test executable — no Xcode required |
+| Path                              | What                                                    |
+| --------------------------------- | ------------------------------------------------------- |
+| `Sources/MultitouchSupport.swift` | Runtime binding to the private framework                |
+| `Sources/SwipeDetector.swift`     | Turns contact frames into swipe events                  |
+| `Sources/GestureEngine.swift`     | Device lifecycle, sleep/wake recovery, keystroke output |
+| `Sources/Settings.swift`          | UserDefaults-backed preferences                         |
+| `App/App.swift`                   | Menu bar UI and permission prompts                      |
+| `Tests/TabSwipeTests.swift`       | Standalone test executable — no Xcode required          |
 
 ## Building
 
