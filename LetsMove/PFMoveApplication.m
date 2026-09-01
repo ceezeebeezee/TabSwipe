@@ -24,15 +24,22 @@
 
 // Strings
 // These are macros to be able to use custom i18n tools
+//
+// TabSwipe: replaced upstream's defaults. The originals date from 2010 and
+// speak in the first person ("I can move myself…"), never name the app, and
+// lead with an administrator-password warning. In the shipped flow this dialog
+// is a safety net only — the installer package always lands the app in
+// /Applications — so it fires exactly when someone runs TabSwipe from an odd
+// place, and the copy should explain why moving matters there.
 #define _I10NS(nsstr) NSLocalizedStringFromTableInBundle(nsstr, @"MoveApplication", [LetsMove bundle], nil)
-#define kStrMoveApplicationCouldNotMove _I10NS(@"Could not move to Applications folder")
-#define kStrMoveApplicationQuestionTitle  _I10NS(@"Move to Applications folder?")
-#define kStrMoveApplicationQuestionTitleHome _I10NS(@"Move to Applications folder in your Home folder?")
-#define kStrMoveApplicationQuestionMessage _I10NS(@"I can move myself to the Applications folder if you'd like.")
-#define kStrMoveApplicationButtonMove _I10NS(@"Move to Applications Folder")
-#define kStrMoveApplicationButtonDoNotMove _I10NS(@"Do Not Move")
-#define kStrMoveApplicationQuestionInfoWillRequirePasswd _I10NS(@"Note that this will require an administrator password.")
-#define kStrMoveApplicationQuestionInfoInDownloadsFolder _I10NS(@"This will keep your Downloads folder uncluttered.")
+#define kStrMoveApplicationCouldNotMove _I10NS(@"Could not move TabSwipe to the Applications folder")
+#define kStrMoveApplicationQuestionTitle  _I10NS(@"Move TabSwipe to the Applications folder?")
+#define kStrMoveApplicationQuestionTitleHome _I10NS(@"Move TabSwipe to the Applications folder in your home folder?")
+#define kStrMoveApplicationQuestionMessage _I10NS(@"TabSwipe is running from outside the Applications folder. Updates and Start at Login only work reliably from Applications, so it can move itself there and reopen.")
+#define kStrMoveApplicationButtonMove _I10NS(@"Move to Applications")
+#define kStrMoveApplicationButtonDoNotMove _I10NS(@"Not Now")
+#define kStrMoveApplicationQuestionInfoWillRequirePasswd _I10NS(@"macOS will ask for an administrator password to complete the move.")
+#define kStrMoveApplicationQuestionInfoInDownloadsFolder _I10NS(@"This also keeps your Downloads folder tidy.")
 
 // Needs to be defined for compiling under 10.5 SDK
 #ifndef NSAppKitVersionNumber10_5
