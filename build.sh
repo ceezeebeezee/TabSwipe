@@ -10,8 +10,8 @@ VERSION="1.0"
 
 APP_NAME="TabSwipe"
 APP_BUNDLE="$APP_NAME.app"
-DMG_NAME="$APP_NAME.dmg"
-ZIP_NAME="$APP_NAME-$VERSION.zip"   # what Sparkle downloads
+PKG_NAME="$APP_NAME.pkg"            # what people download and install
+ZIP_NAME="$APP_NAME-$VERSION.zip"   # what Sparkle downloads for updates
 TEAM_ID="GFJX8GLA7X"
 NOTARIZE_PROFILE="TabSwipe-Notarize"
 
@@ -227,10 +227,11 @@ if [ "$SIGN_MODE" = "developer-id" ]; then
 fi
 
 # --- Notarize the app, then staple the ticket INTO the bundle ---
-# Stapling only the DMG leaves the app unverifiable offline once a user has
-# dragged it out to /Applications: the ticket lives on the disk image, not in
-# the thing they actually run. Notarizing a zip of the bundle lets us staple
-# the ticket into TabSwipe.app itself, before it is packaged.
+# Stapling only the installer leaves the app unverifiable offline once it has
+# been installed: the ticket would live on the package, not in the thing the
+# user actually runs. Notarizing a zip of the bundle lets us staple the ticket
+# into TabSwipe.app itself, before it is packaged — and the same stapled bundle
+# is what Sparkle later ships as an update.
 APP_NOTARIZED="skipped"
 if [ "$NOTARY_READY" = "yes" ]; then
     echo ""
@@ -252,57 +253,90 @@ if [ "$NOTARY_READY" = "yes" ]; then
     rm -f "$ZIP_PATH"
 fi
 
-# --- Create DMG (now containing the stapled app) ---
+# --- Build the installer package ---
+# Ships instead of a disk image. Installer.app does the placing, so there is
+# nothing to drag and nothing to explain, and a package does not set the
+# quarantine flag on what it installs — so the app never shows Gatekeeper's
+# "downloaded from the Internet" confirmation on first launch either.
 echo ""
-echo "Creating $DMG_NAME..."
-DMG_STAGING="/tmp/TabSwipe-dmg"
-rm -rf "$DMG_STAGING" "$DMG_NAME"
-mkdir -p "$DMG_STAGING"
+echo "Creating $PKG_NAME..."
+PKG_SCRIPTS="/tmp/TabSwipe-pkgscripts"
+COMPONENT_PKG="/tmp/TabSwipe-component.pkg"
+rm -rf "$PKG_SCRIPTS" "$PKG_NAME" "$COMPONENT_PKG"
+mkdir -p "$PKG_SCRIPTS"
 
-# The disk image holds the app and nothing else — no Applications symlink to
-# drag onto and no readme. Opening TabSwipe from the mounted image is the
-# install: it copies itself to /Applications, reopens from there, and then
-# walks the user through the trackpad settings and the Accessibility grant.
-# A symlink here would just offer a second, worse path to the same place.
-cp -R "$APP_BUNDLE" "$DMG_STAGING/"
-
-hdiutil create -volname "TabSwipe" \
-    -srcfolder "$DMG_STAGING" \
-    -ov -format UDZO \
-    "$DMG_NAME" 2>/dev/null
-
-rm -rf "$DMG_STAGING"
-
-# --- Sign the DMG (Developer ID only) ---
-if [ "$SIGN_MODE" = "developer-id" ]; then
-    codesign --sign "$DEV_ID_CERT" --timestamp "$DMG_NAME"
-    echo "✓ DMG signed with Developer ID"
+# Launch after installing, or a menu bar app with no Dock icon leaves the user
+# staring at a "success" sheet with no evidence anything happened.
+cat > "$PKG_SCRIPTS/postinstall" << 'POST'
+#!/bin/bash
+# The installer runs as root. Opening the app from here without dropping back
+# to the console user would run TabSwipe as root: its preferences would land in
+# root's home, and its login item and Accessibility grant would be recorded
+# against the wrong user.
+CONSOLE_USER=$(/usr/bin/stat -f "%Su" /dev/console)
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    CONSOLE_UID=$(/usr/bin/id -u "$CONSOLE_USER")
+    /bin/launchctl asuser "$CONSOLE_UID" \
+        /usr/bin/open -a "/Applications/TabSwipe.app" || true
 fi
+exit 0
+POST
+chmod +x "$PKG_SCRIPTS/postinstall"
 
-DMG_SIZE=$(du -h "$DMG_NAME" | cut -f1 | xargs)
-echo "✓ Created $DMG_NAME ($DMG_SIZE)"
+pkgbuild --component "$APP_BUNDLE" \
+         --scripts "$PKG_SCRIPTS" \
+         --identifier "com.tabswipe.app.pkg" \
+         --version "$VERSION" \
+         --install-location "/Applications" \
+         "$COMPONENT_PKG" >/dev/null
 
-# --- Notarize and staple the DMG itself ---
-# Second submission: the disk image is a separate artifact from the app and
-# needs its own ticket, so Gatekeeper clears it at mount time.
+# Packages are signed with productsign/productbuild and a Developer ID
+# *Installer* identity — a different certificate from the Application one used
+# for codesign above. Without it the package still builds and installs locally,
+# but Gatekeeper will refuse it on anyone else's Mac.
+INSTALLER_CERT=$(security find-identity -v | grep "Developer ID Installer" | grep "$TEAM_ID" | head -1 | awk -F'"' '{print $2}')
+
+if [ -n "$INSTALLER_CERT" ]; then
+    productbuild --package "$COMPONENT_PKG" --sign "$INSTALLER_CERT" --timestamp "$PKG_NAME" >/dev/null
+    PKG_SIGNED="yes"
+    echo "✓ Package signed with: $INSTALLER_CERT"
+else
+    productbuild --package "$COMPONENT_PKG" "$PKG_NAME" >/dev/null
+    PKG_SIGNED="no"
+    echo "⚠ No Developer ID Installer certificate found — package is UNSIGNED."
+    echo "  It installs on this Mac but Gatekeeper will reject it elsewhere."
+    echo "  Create one at developer.apple.com (Certificates → + → Developer ID"
+    echo "  → Developer ID Installer), then re-run this script."
+fi
+rm -rf "$PKG_SCRIPTS" "$COMPONENT_PKG"
+
+PKG_SIZE=$(du -h "$PKG_NAME" | cut -f1 | xargs)
+echo "✓ Created $PKG_NAME ($PKG_SIZE)"
+
+# --- Notarize and staple the package ---
+# Its own submission: the package is a separate artifact from the app inside it
+# and needs its own ticket so Gatekeeper clears it when it is opened.
 NOTARIZED="skipped"
-if [ "$NOTARY_READY" = "yes" ]; then
+if [ "$NOTARY_READY" = "yes" ] && [ "$PKG_SIGNED" = "yes" ]; then
     echo ""
-    echo "Notarizing $DMG_NAME..."
-    if xcrun notarytool submit "$DMG_NAME" --keychain-profile "$NOTARIZE_PROFILE" --wait; then
-        xcrun stapler staple "$DMG_NAME"
-        xcrun stapler validate "$DMG_NAME"
+    echo "Notarizing $PKG_NAME..."
+    if xcrun notarytool submit "$PKG_NAME" --keychain-profile "$NOTARIZE_PROFILE" --wait; then
+        xcrun stapler staple "$PKG_NAME"
+        xcrun stapler validate "$PKG_NAME"
         NOTARIZED="yes"
     else
         NOTARIZED="failed"
-        echo "⚠ DMG notarization failed. For details:"
-        echo "   xcrun notarytool submit $DMG_NAME --keychain-profile $NOTARIZE_PROFILE --wait --verbose"
+        echo "⚠ Package notarization failed. For details:"
+        echo "   xcrun notarytool submit $PKG_NAME --keychain-profile $NOTARIZE_PROFILE --wait --verbose"
     fi
+elif [ "$PKG_SIGNED" = "no" ]; then
+    echo "  Skipping notarization: an unsigned package cannot be notarized."
 fi
 
 # --- Build the Sparkle update archive ---
-# Sparkle downloads a zip, not the DMG: no mounting, and the app inside is
-# already stapled. --sequesterRsrc preserves the symlinks a versioned framework
+# Sparkle downloads a zip, not the installer: updates replace the bundle in
+# place rather than reinstalling, and the app inside is already stapled.
+# --sequesterRsrc preserves the symlinks a versioned framework
 # needs, without which Sparkle.framework's signature fails to validate after
 # the round trip.
 echo ""
@@ -335,7 +369,7 @@ if [ -x "$GENERATE_APPCAST" ]; then
         -o "$DIST/appcast.xml" \
         "$DIST"
     echo "✓ Signed appcast at $DIST/appcast.xml"
-    echo "  Publish: copy $DIST/appcast.xml and $ZIP_NAME (and $DMG_NAME) to"
+    echo "  Publish: copy $DIST/appcast.xml, $ZIP_NAME and $PKG_NAME to"
     echo "  czbz/tabswipe/, then deploy."
 else
     echo "⚠ generate_appcast not found; cannot produce a signed appcast."
@@ -357,11 +391,13 @@ echo ""
 if [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ] && [ "$APP_NOTARIZED" = "yes" ]; then
     echo "  🎉 Ready for distribution!"
     echo ""
-    echo "  Both the app and the disk image are notarized and stapled."
-    echo "  Send $DMG_NAME to anyone - they open it, double-click TabSwipe,"
-    echo "  and it installs itself. No warnings, no terminal, works offline."
+    echo "  Both the app and the installer are notarized and stapled."
+    echo "  Send $PKG_NAME to anyone - they open it, click through, and"
+    echo "  TabSwipe installs and launches itself. No dragging, and no"
+    echo "  \"downloaded from the Internet\" warning: an installed package"
+    echo "  is not quarantined."
 elif [ "$SIGN_MODE" = "developer-id" ] && [ "$NOTARIZED" = "yes" ]; then
-    echo "  DMG notarized, but the app bundle was not stapled."
+    echo "  Installer notarized, but the app bundle was not stapled."
     echo "  Users on a machine with no network may still see a warning."
 elif [ "$SIGN_MODE" = "developer-id" ]; then
     echo "  Signed with Developer ID, but not notarized."

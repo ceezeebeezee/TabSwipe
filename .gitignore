@@ -3,6 +3,7 @@
 *.app/
 TabSwipe.dmg
 TabSwipe-*.zip
+TabSwipe.pkg
 .claude/settings.local.json
 setup-signing.sh
 dist/
