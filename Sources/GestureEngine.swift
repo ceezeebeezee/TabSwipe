@@ -136,7 +136,7 @@ public final class GestureEngine {
         removeObservers()
         detachDevices()
         isRunning = false
-        Log.info("Gesture engine stopped")
+        Log.notice("Gesture engine stopped")
     }
 
     /// Full restart: re-enumerates trackpads. Used after wake and after the
@@ -173,7 +173,7 @@ public final class GestureEngine {
             }
             devices.append(device)
         }
-        Log.info("Gesture engine active on \(count) multitouch device(s)")
+        Log.notice("Gesture engine active on \(count) multitouch device(s)")
     }
 
     private func detachDevices() {
@@ -198,14 +198,41 @@ public final class GestureEngine {
             self?.updateChromePid(app)
         })
 
-        // MultitouchSupport callbacks are known to die across sleep/wake.
+        // The wake notification can arrive before the trackpad has finished
+        // re-enumerating. Re-attaching in that window binds to stale device
+        // handles that never deliver a frame — and nothing reports an error,
+        // so the menu bar icon stays up while gestures are silently dead. So:
+        // re-attach after a short delay, and once more later as a safety net.
+        // Both passes are idempotent (detach + attach) and cheap.
         observers.append(center.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Log.info("Woke from sleep — re-attaching trackpad devices")
-            self?.detachDevices()
-            self?.attachDevices()
+            Log.notice("Woke from sleep — scheduling trackpad re-attach")
+            self?.scheduleReattach()
         })
+        // Lid-open / display wake can bring the trackpad back on a different
+        // path than a full system wake (clamshell sleep, external display).
+        observers.append(center.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Log.notice("Screens woke — scheduling trackpad re-attach")
+            self?.scheduleReattach()
+        })
+    }
+
+    /// Re-attach the trackpad after a wake — twice. The first pass runs once
+    /// the hardware has had a moment to re-enumerate; the second is a safety
+    /// net in case the first still caught it mid-transition. Skipped if the
+    /// engine has been stopped in the meantime.
+    private func scheduleReattach() {
+        for delay in [2.0, 8.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.isRunning else { return }
+                Log.notice("Re-attaching trackpad devices (\(Int(delay))s after wake)")
+                self.detachDevices()
+                self.attachDevices()
+            }
+        }
     }
 
     private func removeObservers() {

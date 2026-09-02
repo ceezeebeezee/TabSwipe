@@ -98,12 +98,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         checkAccessibilityPermission()
         showSetupTipsIfNeeded()
 
-        Log.info("TabSwipe started. Swipe distance: \(AppSettings.shared.swipeLevel), Direction: \(AppSettings.shared.direction)")
+        Log.notice("TabSwipe started. Swipe distance: \(AppSettings.shared.swipeLevel), Direction: \(AppSettings.shared.direction)")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         GestureEngine.shared.stop()
-        Log.info("TabSwipe terminated")
+        Log.notice("TabSwipe terminated")
     }
 
     // Relaunching the app (e.g. from Applications) restores a hidden icon.
