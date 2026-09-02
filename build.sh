@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 # Single source of truth for the release version. Sparkle compares this against
 # the appcast to decide whether an update exists, so bumping it here is what
 # makes a build "new" to everyone already running TabSwipe.
-VERSION="1.1"
+VERSION="1.2"
 
 APP_NAME="TabSwipe"
 APP_BUNDLE="$APP_NAME.app"
@@ -131,10 +131,11 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <!-- Weekly. Sparkle's default is 86400 (daily); its floor is one hour. -->
     <key>SUScheduledCheckInterval</key>
     <integer>604800</integer>
-    <!-- SUEnableAutomaticChecks is deliberately absent: with it unset Sparkle
-         asks the user, on second launch, whether to check automatically.
-         Opting in beats deciding for them for an app that used to make no
-         network connections at all. -->
+    <!-- Check automatically (weekly, per SUScheduledCheckInterval) without
+         asking first — users are enrolled by default. Installing an update
+         still requires a click: SUAllowsAutomaticUpdates is false below. -->
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
     <!-- No silent background installs, and no offering them to the user. This
          is what keeps TabSwipe free of resident processes: when Sparkle stages
          an update to apply on quit, it leaves Autoupdate and Updater.app
