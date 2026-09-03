@@ -10,6 +10,7 @@ public final class AppSettings {
         static let direction = "direction"
         static let isEnabled = "isEnabled"
         static let hasShownSetupTips = "hasShownSetupTips"
+        static let debugLogging = "debugLogging"
     }
 
     private static let defaults = UserDefaults.standard
@@ -36,12 +37,21 @@ public final class AppSettings {
         set { Self.defaults.set(newValue, forKey: Keys.hasShownSetupTips) }
     }
 
+    /// Troubleshooting › Debug Logging. Persisted so a problem that only shows
+    /// up after a day of sleeping and waking is captured without the user
+    /// having to remember to turn it back on after a relaunch.
+    public var debugLogging: Bool {
+        get { Self.defaults.bool(forKey: Keys.debugLogging) }
+        set { Self.defaults.set(newValue, forKey: Keys.debugLogging) }
+    }
+
     public init() {
         Self.defaults.register(defaults: [
             Keys.swipeLevel: 10,
             Keys.direction: "RTL",
             Keys.isEnabled: true,
-            Keys.hasShownSetupTips: false
+            Keys.hasShownSetupTips: false,
+            Keys.debugLogging: false
         ])
     }
 }

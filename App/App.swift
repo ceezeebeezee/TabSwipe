@@ -40,8 +40,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Everything TabSwipe leaves outside its own bundle. Kept in one place so
     /// Uninstall cannot drift out of sync with what actually accumulates —
-    /// the last three are created by Sparkle rendering release notes in a
-    /// WebView, and did not exist before it was added.
+    /// the Caches/HTTPStorages/WebKit trio is created by Sparkle rendering
+    /// release notes in a WebView, and Logs only exists if Debug Logging was
+    /// ever turned on.
     private static var supportFileURLs: [URL] {
         guard
             let id = Bundle.main.bundleIdentifier,
@@ -56,7 +57,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "Caches/\(id)",
             "HTTPStorages/\(id)",
             "WebKit/\(id)",
-        ].map { library.appendingPathComponent($0) }
+        ].map { library.appendingPathComponent($0) } + [Log.logDirectoryURL]
     }
 
     private var statusItem: NSStatusItem!
@@ -92,6 +93,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
 
         let engine = GestureEngine.shared
+        // Before start(), so that device attachment is in the debug log.
+        engine.setDebugLogging(AppSettings.shared.debugLogging)
         engine.applySettings(AppSettings.shared)
         engine.start()
 
@@ -129,7 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if AXIsProcessTrusted() {
                 timer.invalidate()
                 self?.accessibilityCheckTimer = nil
-                Log.info("Accessibility permission granted — restarting gesture engine")
+                Log.notice("Accessibility permission granted — restarting gesture engine")
                 GestureEngine.shared.restart()
             }
         }
@@ -421,6 +424,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         aboutItem.target = self
         menu.addItem(aboutItem)
 
+        // Troubleshooting submenu. Its items carry real state, so it keeps
+        // its state column like the other submenus.
+        let troubleshootingItem = NSMenuItem(title: "Troubleshooting", action: nil, keyEquivalent: "")
+        let troubleshootingMenu = NSMenu()
+        troubleshootingMenu.autoenablesItems = false
+
+        let restartItem = NSMenuItem(title: "Restart Gesture Detection",
+                                     action: #selector(restartGestureDetection(_:)), keyEquivalent: "")
+        restartItem.target = self
+        troubleshootingMenu.addItem(restartItem)
+
+        troubleshootingMenu.addItem(.separator())
+
+        let debugItem = NSMenuItem(title: "Debug Logging",
+                                   action: #selector(toggleDebugLogging(_:)), keyEquivalent: "")
+        debugItem.target = self
+        debugItem.state = settings.debugLogging ? .on : .off
+        troubleshootingMenu.addItem(debugItem)
+
+        let showLogItem = NSMenuItem(title: "Show Debug Log in Finder",
+                                     action: #selector(showDebugLog(_:)), keyEquivalent: "")
+        showLogItem.target = self
+        showLogItem.isEnabled = FileManager.default.fileExists(atPath: Log.logFileURL.path)
+        troubleshootingMenu.addItem(showLogItem)
+
+        troubleshootingItem.submenu = troubleshootingMenu
+        menu.addItem(troubleshootingItem)
+
         // Uninstall
         let uninstallItem = NSMenuItem(title: "Uninstall TabSwipe…", action: #selector(uninstall(_:)), keyEquivalent: "")
         uninstallItem.target = self
@@ -444,18 +475,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleEnabled(_ sender: NSMenuItem) {
         AppSettings.shared.isEnabled.toggle()
+        Log.notice("Menu: Enabled set to \(AppSettings.shared.isEnabled)")
         GestureEngine.shared.applySettings(AppSettings.shared)
     }
 
     @objc private func setSwipeDistance(_ sender: NSMenuItem) {
         AppSettings.shared.swipeLevel = sender.tag
+        Log.notice("Menu: Swipe Distance set to \(sender.tag)")
         GestureEngine.shared.applySettings(AppSettings.shared)
     }
 
     @objc private func setDirection(_ sender: NSMenuItem) {
         guard let direction = sender.representedObject as? String else { return }
         AppSettings.shared.direction = direction
+        Log.notice("Menu: Direction set to \(direction)")
         GestureEngine.shared.applySettings(AppSettings.shared)
+    }
+
+    // MARK: Troubleshooting
+
+    @objc private func restartGestureDetection(_ sender: NSMenuItem) {
+        Log.notice("Menu: Restart Gesture Detection")
+        GestureEngine.shared.restart()
+    }
+
+    @objc private func toggleDebugLogging(_ sender: NSMenuItem) {
+        let enabled = !AppSettings.shared.debugLogging
+        AppSettings.shared.debugLogging = enabled
+        GestureEngine.shared.setDebugLogging(enabled)
+    }
+
+    @objc private func showDebugLog(_ sender: NSMenuItem) {
+        NSWorkspace.shared.activateFileViewerSelecting([Log.logFileURL])
     }
 
     @objc private func toggleLoginItem(_ sender: NSMenuItem) {

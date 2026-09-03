@@ -2,7 +2,7 @@
 
 Three-finger trackpad swipe to switch Google Chrome tabs on macOS.
 
-A ~1,200-line Swift menu bar app. No window, no preferences pane, no account,
+A ~1,600-line Swift menu bar app. No window, no preferences pane, no account,
 no update checks, no network code of any kind.
 
 **[Download the signed, notarized app →](https://czbz.ai/tabswipe)**

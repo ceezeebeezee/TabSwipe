@@ -15,7 +15,12 @@ swift build -c release \
 swift run -c release \
   --scratch-path ~/Library/Caches/TabSwipe-build TabSwipeTests        # tests
 swift generate-icon.swift && iconutil -c icns /tmp/TabSwipe.iconset -o TabSwipe.icns
+/usr/bin/log show --predicate 'subsystem == "com.tabswipe.app"' --last 1h    # persisted app log
 ```
+
+**Spell out `/usr/bin/log`.** `log` is a zsh builtin, so a bare `log show`
+fails with "too many arguments" — and with stderr hidden it looks like an
+empty log.
 
 **Always pass `--scratch-path`.** `~/Projects` is inside a Google Drive synced
 folder, and Drive's virtual filesystem does not honour SQLite locking, so
@@ -30,6 +35,7 @@ linked binaries silently fail to materialise. `build.sh` sets this already.
 - `Sources/GestureEngine.swift` — device lifecycle, sleep/wake recovery,
   keystroke output
 - `Sources/Settings.swift` — UserDefaults-backed preferences
+- `Sources/Log.swift` — unified logging plus the opt-in debug log file
 - `App/App.swift` — the entire UI: status item, menu, first-run install,
   welcome dialog, Sparkle wiring, uninstall
 - `LetsMove/` — vendored, Objective-C with manual retain/release, so it is
@@ -112,6 +118,31 @@ It checks the live feed within ~15 s, stages silently, and installs on quit —
 verify the on-disk bundle became the new version. This exercises every stage
 except the "Install and Relaunch" button UI. Snapshot/restore the defaults
 domain around the test, and clean up `~/Library/Caches/com.tabswipe.app*`.
+
+## Logging and Debug Mode
+
+Three tiers, chosen by what survives: `Log.notice`/`Log.error` go to the
+unified log at a level macOS persists (lifecycle: start, sleep/wake, re-attach,
+menu changes); `Log.info` is memory-only; `Log.debug` is silent unless
+**Troubleshooting › Debug Logging** is on, in which case everything — including
+the notices — is also appended to `~/Library/Logs/TabSwipe/TabSwipe.log`
+(rolls over at 4 MB to `.log.1`; Uninstall removes the directory). The setting
+persists across relaunches on purpose: the failures worth catching take a day
+of sleep/wake cycles to appear.
+
+What the debug log records: a header (versions, model, Accessibility state,
+each multitouch device with id/family/built-in/running), every gesture arm,
+suppression, lift and fire with the pid the keystroke went to, frontmost-app
+changes as seen by the pid cache, re-attach passes, and a heartbeat every
+minute with the frame count. A heartbeat with zero frames while the user is
+swiping means the trackpad has stopped delivering; frames with "Chrome is not
+the frontmost app" means the pid cache is the problem; a fire with a pid means
+the app did its job and Chrome ignored the keystroke.
+
+`Log.debug` takes an autoclosure — callers on the touch-callback path pay
+nothing when the mode is off. File writes go through a serial queue, never on
+the caller's thread, and the debug lines from the callback are collected under
+the lock but emitted after it is released.
 
 ## Gotchas
 

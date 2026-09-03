@@ -46,6 +46,10 @@ public struct SwipeDetector {
 
     private var tracking = false
     private var suppressed = false   // rules 3 & 4: dead until all fingers lift
+
+    /// Read-only views of the gesture state, for the debug log.
+    public var isTracking: Bool { tracking }
+    public var isSuppressed: Bool { suppressed }
     private var startX: Float = 0
     private var startY: Float = 0
     private var lastSwitchX: Float = 0
@@ -100,7 +104,12 @@ public struct SwipeDetector {
         let deltaX = avgX - lastSwitchX
         guard abs(deltaX) >= threshold, abs(totalDx) > 2 * abs(totalDy) else { return nil }
 
-        if timestamp - lastFireTime > Self.cooldown {
+        // The clock is the trackpad's own. Stopping and restarting the device
+        // — which happens after every wake — may restart it, and a last-fire
+        // time from before would then sit in the future and hold the cooldown
+        // shut for as long as the app runs. A backwards jump counts as expired.
+        let sinceLastFire = timestamp - lastFireTime
+        if sinceLastFire > Self.cooldown || sinceLastFire < 0 {
             lastFireTime = timestamp
             lastSwitchX = avgX
             return (deltaX * directionMultiplier) < 0 ? .next : .previous
@@ -116,5 +125,6 @@ public struct SwipeDetector {
     public mutating func reset() {
         tracking = false
         suppressed = false
+        lastFireTime = -.infinity
     }
 }

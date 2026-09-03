@@ -204,6 +204,39 @@ func runDetectorTests() {
         try expectEqual(d.process(touchCount: 3, avgX: 0.6, avgY: 0.5, timestamp: 1.2), nil)
         try expectEqual(d.process(touchCount: 3, avgX: 0.6 + d.threshold * 1.5, avgY: 0.5, timestamp: 1.5), SwipeEvent.next)
     }
+
+    test("Cooldown survives the device clock restarting from zero") {
+        // After a sleep/wake re-attach the trackpad's timestamps may restart.
+        var d = makeDetector()
+        _ = d.process(touchCount: 3, avgX: 0.3, avgY: 0.5, timestamp: 5000.0)
+        try expectEqual(d.process(touchCount: 3, avgX: 0.3 + d.threshold * 1.5, avgY: 0.5, timestamp: 5000.05), SwipeEvent.next)
+        _ = d.process(touchCount: 0, avgX: 0, avgY: 0, timestamp: 5000.2)
+        // Clock jumps backwards: a fresh gesture must still fire.
+        _ = d.process(touchCount: 3, avgX: 0.3, avgY: 0.5, timestamp: 0.1)
+        try expectEqual(d.process(touchCount: 3, avgX: 0.3 + d.threshold * 1.5, avgY: 0.5, timestamp: 0.15), SwipeEvent.next)
+    }
+
+    test("Reset clears suppression, tracking and the cooldown") {
+        var d = makeDetector()
+        _ = d.process(touchCount: 4, avgX: 0.5, avgY: 0.5, timestamp: 1.0)
+        try expect(d.isSuppressed, "Four fingers should suppress")
+        d.reset()
+        try expect(!d.isSuppressed && !d.isTracking, "Reset should clear gesture state")
+        _ = d.process(touchCount: 3, avgX: 0.3, avgY: 0.5, timestamp: 1.1)
+        try expect(d.isTracking, "Should arm after reset without waiting for a lift")
+        try expectEqual(d.process(touchCount: 3, avgX: 0.3 + d.threshold * 1.5, avgY: 0.5, timestamp: 1.15), SwipeEvent.next)
+    }
+
+    test("isTracking and isSuppressed reflect the gesture state") {
+        var d = makeDetector()
+        try expect(!d.isTracking, "Idle at start")
+        _ = d.process(touchCount: 3, avgX: 0.5, avgY: 0.5, timestamp: 1.0)
+        try expect(d.isTracking, "Three fingers arm tracking")
+        _ = d.process(touchCount: 3, avgX: 0.5, avgY: 0.5 + SwipeDetector.verticalAbortDistance * 1.5, timestamp: 1.05)
+        try expect(d.isSuppressed && !d.isTracking, "Vertical movement suppresses")
+        _ = d.process(touchCount: 0, avgX: 0, avgY: 0, timestamp: 1.1)
+        try expect(!d.isSuppressed, "Lifting every finger forgives")
+    }
 }
 
 // MARK: - Engine Apply Tests
@@ -258,7 +291,7 @@ func runEngineTests() {
 func runSettingsTests() {
     print("\n── Settings Persistence ──")
 
-    let keys = ["swipeLevel", "direction", "isEnabled", "hasShownSetupTips"]
+    let keys = ["swipeLevel", "direction", "isEnabled", "hasShownSetupTips", "debugLogging"]
     keys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
 
     test("Default swipeLevel is 10") {
@@ -279,6 +312,18 @@ func runSettingsTests() {
     test("Default hasShownSetupTips is false") {
         let s = AppSettings()
         try expect(!s.hasShownSetupTips, "Should default to not shown")
+    }
+
+    test("Default debugLogging is false") {
+        let s = AppSettings()
+        try expect(!s.debugLogging, "Debug logging must be opt-in")
+    }
+
+    test("Persists debugLogging") {
+        let s = AppSettings()
+        s.debugLogging = true
+        try expect(UserDefaults.standard.bool(forKey: "debugLogging"), "Should persist true")
+        s.debugLogging = false
     }
 
     test("Persists swipeLevel") {

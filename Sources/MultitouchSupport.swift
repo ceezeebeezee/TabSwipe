@@ -58,12 +58,23 @@ struct MTFramework {
     typealias RegisterFn = @convention(c) (MTDeviceRef, MTContactCallback) -> Void
     typealias StartFn = @convention(c) (MTDeviceRef, Int32) -> Int32
     typealias StopFn = @convention(c) (MTDeviceRef) -> Void
+    typealias PredicateFn = @convention(c) (MTDeviceRef) -> Bool
+    typealias DeviceIDFn = @convention(c) (MTDeviceRef, UnsafeMutablePointer<UInt64>) -> Int32
+    typealias FamilyIDFn = @convention(c) (MTDeviceRef, UnsafeMutablePointer<Int32>) -> Int32
 
     private let createListFn: CreateListFn
     let registerContactFrameCallback: RegisterFn
     let deviceStart: StartFn
     let deviceStop: StopFn
     let unregisterContactFrameCallback: RegisterFn?
+
+    // Informational only, for the debug log and the post-start sanity check.
+    // Each is optional: nothing depends on them, so a macOS that lacks one
+    // just logs less.
+    let deviceIsBuiltIn: PredicateFn?
+    let deviceIsRunning: PredicateFn?
+    let deviceGetID: DeviceIDFn?
+    let deviceGetFamilyID: FamilyIDFn?
 
     /// MTDeviceCreateList follows the CF Create rule (+1); the returned array
     /// must be kept alive as long as its MTDeviceRef elements are in use.
@@ -96,7 +107,33 @@ struct MTFramework {
             deviceStart: start,
             deviceStop: stop,
             // Optional: absent on some macOS versions; stop() copes without it.
-            unregisterContactFrameCallback: sym("MTUnregisterContactFrameCallback", as: RegisterFn.self)
+            unregisterContactFrameCallback: sym("MTUnregisterContactFrameCallback", as: RegisterFn.self),
+            deviceIsBuiltIn: sym("MTDeviceIsBuiltIn", as: PredicateFn.self),
+            deviceIsRunning: sym("MTDeviceIsRunning", as: PredicateFn.self),
+            deviceGetID: sym("MTDeviceGetDeviceID", as: DeviceIDFn.self),
+            deviceGetFamilyID: sym("MTDeviceGetFamilyID", as: FamilyIDFn.self)
         )
     }()
+
+    /// One line for the log: which trackpad this is and whether the framework
+    /// thinks it is delivering. Family 110 is the built-in trackpad on Apple
+    /// silicon MacBooks; other families are external Magic devices.
+    func describe(_ device: MTDeviceRef) -> String {
+        var parts = [String(format: "%p", Int(bitPattern: device))]
+        var id: UInt64 = 0
+        if let getID = deviceGetID, getID(device, &id) == 0 {
+            parts.append("id 0x" + String(id, radix: 16))
+        }
+        var family: Int32 = 0
+        if let getFamily = deviceGetFamilyID, getFamily(device, &family) == 0 {
+            parts.append("family \(family)")
+        }
+        if let isBuiltIn = deviceIsBuiltIn {
+            parts.append(isBuiltIn(device) ? "built-in" : "external")
+        }
+        if let isRunning = deviceIsRunning {
+            parts.append(isRunning(device) ? "running" : "NOT running")
+        }
+        return parts.joined(separator: ", ")
+    }
 }
