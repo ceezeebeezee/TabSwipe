@@ -108,6 +108,12 @@ means never shipping an update again, because installed copies only accept
 what verifies against the public key compiled into them. Export with
 `generate_keys -x`, import with `-f`. Do not regenerate or rotate it.
 
+**`/Applications/TabSwipe.app` is root-owned after a pkg install**, so a
+plain `ditto` over it fails with permission errors — kill the process first
+and you have simply stopped the user's app. To put a new build there without
+the user, there is no path: use the pkg (Installer.app) or Check for Updates.
+Sparkle copes with the root-owned bundle by asking for an admin password.
+
 ### Testing an update end to end
 
 Copy the built `TabSwipe.app` to `/tmp/updtest/`, patch both version keys to
