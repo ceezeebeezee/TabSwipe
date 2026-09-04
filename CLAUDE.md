@@ -73,6 +73,13 @@ installer for an update.
   user can recreate it — it needs their Apple ID and an app-specific password:
   `xcrun notarytool store-credentials "TabSwipe-Notarize" --apple-id … --team-id GFJX8GLA7X`).
 
+**Do not build with the Mac locked.** A locked screen locks the login
+keychain, notarytool then reports the profile as missing, and `build.sh`
+refuses to continue (it used to warn and produce an unnotarized package that
+Gatekeeper rejects for every downloader — that shipped once, for minutes, in
+1.4). If the profile "disappears", unlock the Mac and retry before recreating
+anything. `ALLOW_UNNOTARIZED=1` bypasses the refusal for local test builds only.
+
 The script runs tests, builds, embeds and signs Sparkle, notarizes and staples
 the app, builds/signs/notarizes/staples `TabSwipe.pkg`, writes the update zip,
 and generates a **signed appcast** at `dist/appcast.xml` via `generate_appcast`
