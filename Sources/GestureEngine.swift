@@ -12,7 +12,18 @@ import os
 // The main thread only touches this file through GestureEngine (device
 // lifecycle, settings) and the NSWorkspace observers (frontmost-app cache).
 
-private let chromeBundleID = "com.google.Chrome"
+/// Whether a frontmost app is Chrome, in any of the forms Chrome takes on
+/// screen. Besides the browser itself, every installed web app (Gmail,
+/// Calendar, ... via "Open as window") runs as its own app shim process with
+/// its own bundle id, `com.google.Chrome.app.<id>`, and the window server
+/// says the app's windows belong to that shim — so the keystroke goes to the
+/// shim's pid, not the browser's. Chrome's release channels (`.beta`, `.dev`,
+/// `.canary`) share the prefix. The helper and framework processes do too,
+/// but are never frontmost; excluded for precision.
+public func isChromeBundleIdentifier(_ id: String?) -> Bool {
+    guard let id, id.hasPrefix("com.google.Chrome") else { return false }
+    return !id.contains(".helper") && !id.contains(".framework")
+}
 
 /// The Tab key. Ctrl+Tab / Ctrl+Shift+Tab are Chrome's browser-reserved
 /// tab-cycling shortcuts — unlike Cmd+Opt+Arrow, web pages (Google Docs,
@@ -23,7 +34,7 @@ private let kTabKey: UInt16 = 48
 
 private struct CallbackState {
     var detector = SwipeDetector()
-    var chromePid: pid_t?  // non-nil only while Chrome is frontmost
+    var chromePid: pid_t?  // non-nil only while a Chrome window is frontmost
 
     // Bookkeeping for the debug log and the heartbeat. Kept always — it is a
     // couple of stores per frame — but only read when Debug Logging is on.
@@ -150,7 +161,7 @@ private let touchCallback: MTContactCallback = { device, rawTouches, count, time
 
         guard let event else { return out }
         guard let pid = state.chromePid else {
-            if debug { out.lines.append("Swipe detected but Chrome is not the frontmost app — nothing sent") }
+            if debug { out.lines.append("Swipe detected but a Chrome window is not in front — nothing sent") }
             return out
         }
         out.fire = (event, pid)
@@ -358,7 +369,7 @@ public final class GestureEngine {
     }
 
     private func updateChromePid(_ app: NSRunningApplication?, source: String) {
-        let pid: pid_t? = app?.bundleIdentifier == chromeBundleID ? app?.processIdentifier : nil
+        let pid: pid_t? = isChromeBundleIdentifier(app?.bundleIdentifier) ? app?.processIdentifier : nil
         let changed = stateLock.withLock { state -> Bool in
             let changed = state.chromePid != pid
             state.chromePid = pid
@@ -366,7 +377,7 @@ public final class GestureEngine {
         }
         if changed {
             Log.debug("Frontmost app: \(app?.bundleIdentifier ?? "none") (\(source)) — "
-                + (pid.map { "swipes go to Chrome pid \($0)" } ?? "swipes have no target"))
+                + (pid.map { "swipes go to \(app?.localizedName ?? "Chrome") pid \($0)" } ?? "swipes have no target"))
         }
     }
 

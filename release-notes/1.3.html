@@ -1,6 +1,19 @@
 <p>Better answers when gestures stop, and two fixes for ways they could.</p>
 <ul>
-  <li>New Troubleshooting submenu. <b>Restart Gesture Detection</b> re-attaches the trackpad without relaunching. <b>Debug Logging</b> writes a detailed log to ~/Library/Logs/TabSwipe — every gesture, every sleep and wake, and a heartbeat once a minute — that you can attach to a bug report. Off by default; nothing is ever sent anywhere.</li>
-  <li>The Chrome target is re-checked whenever a gesture starts, so coming back to Chrome from the lock screen can no longer leave swipes with nowhere to go.</li>
-  <li>A trackpad restart after wake can no longer leave the swipe pacing timer stuck in the future, which would have silently blocked every swipe until relaunch.</li>
+  <li>
+    New Troubleshooting submenu. <b>Restart Gesture Detection</b> re-attaches
+    the trackpad without relaunching. <b>Debug Logging</b> writes a detailed log
+    to ~/Library/Logs/TabSwipe — every gesture, every sleep and wake, and a
+    heartbeat once a minute — that you can attach to a bug report. Off by
+    default; nothing is ever sent anywhere.
+  </li>
+  <li>
+    The Chrome target is re-checked whenever a gesture starts, so coming back to
+    Chrome from the lock screen can no longer leave swipes with nowhere to go.
+  </li>
+  <li>
+    A trackpad restart after wake can no longer leave the swipe pacing timer
+    stuck in the future, which would have silently blocked every swipe until
+    relaunch.
+  </li>
 </ul>

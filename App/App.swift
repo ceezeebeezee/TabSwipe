@@ -227,7 +227,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         section(
             "Swipe to switch tabs",
             "Three fingers left or right, anywhere on the trackpad, moves Chrome "
-                + "one tab. Chrome does not need to be focused for the swipe to land."
+                + "one tab. Any Chrome window in front counts, including web apps "
+                + "you open as their own windows."
         )
 
         section(

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 # Single source of truth for the release version. Sparkle compares this against
 # the appcast to decide whether an update exists, so bumping it here is what
 # makes a build "new" to everyone already running TabSwipe.
-VERSION="1.3"
+VERSION="1.4"
 
 APP_NAME="TabSwipe"
 APP_BUNDLE="$APP_NAME.app"

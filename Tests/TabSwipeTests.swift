@@ -239,6 +239,38 @@ func runDetectorTests() {
     }
 }
 
+// MARK: - Chrome Target Tests
+
+func runChromeTargetTests() {
+    print("\n── Chrome Target ──")
+
+    test("Chrome itself is a target") {
+        try expect(isChromeBundleIdentifier("com.google.Chrome"), "browser")
+    }
+
+    test("Installed web app shims are targets") {
+        try expect(isChromeBundleIdentifier("com.google.Chrome.app.fmgjjmmmlfnkbppncabfkddbjimcfncm"), "Gmail window")
+    }
+
+    test("Release channels are targets") {
+        for id in ["com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary"] {
+            try expect(isChromeBundleIdentifier(id), id)
+        }
+    }
+
+    test("Helper and framework processes are not targets") {
+        try expect(!isChromeBundleIdentifier("com.google.Chrome.helper"), "helper")
+        try expect(!isChromeBundleIdentifier("com.google.Chrome.helper.renderer"), "renderer")
+        try expect(!isChromeBundleIdentifier("com.google.Chrome.framework.AlertNotificationService"), "framework")
+    }
+
+    test("Other apps and nil are not targets") {
+        try expect(!isChromeBundleIdentifier("com.apple.Safari"), "Safari")
+        try expect(!isChromeBundleIdentifier("com.apple.loginwindow"), "lock screen")
+        try expect(!isChromeBundleIdentifier(nil), "nil")
+    }
+}
+
 // MARK: - Engine Apply Tests
 
 func runEngineTests() {
@@ -401,6 +433,7 @@ print("===================")
 
 runThresholdTests()
 runDetectorTests()
+runChromeTargetTests()
 runEngineTests()
 runSettingsTests()
 runRoundTripTests()

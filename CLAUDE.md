@@ -33,7 +33,9 @@ linked binaries silently fail to materialise. `build.sh` sets this already.
   MultitouchSupport framework, loaded with `dlopen`
 - `Sources/SwipeDetector.swift` — contact frames to swipe events
 - `Sources/GestureEngine.swift` — device lifecycle, sleep/wake recovery,
-  keystroke output
+  keystroke output. "Chrome" means any `com.google.Chrome*` frontmost app:
+  installed web apps (Gmail, Calendar, "Open as window") are separate app-shim
+  processes that own their windows, so the keystroke goes to the shim's pid
 - `Sources/Settings.swift` — UserDefaults-backed preferences
 - `Sources/Log.swift` — unified logging plus the opt-in debug log file
 - `App/App.swift` — the entire UI: status item, menu, first-run install,
