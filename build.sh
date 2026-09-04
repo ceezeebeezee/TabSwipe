@@ -224,6 +224,16 @@ if [ "$SIGN_MODE" = "developer-id" ]; then
         echo "⚠ Notary credentials not found in keychain."
         echo "  Set up with: xcrun notarytool store-credentials \"$NOTARIZE_PROFILE\" \\"
         echo "                  --apple-id <your-apple-id> --team-id $TEAM_ID"
+        echo "  If they were there a moment ago, the login keychain is probably locked"
+        echo "  (locked screen, sleep) — unlock the Mac and run again."
+        # An unnotarized package is one that Gatekeeper rejects for every
+        # downloader, and nothing else in this script or the publishing steps
+        # would notice. Refuse to produce one unless explicitly told to.
+        if [ "${ALLOW_UNNOTARIZED:-}" != "1" ]; then
+            echo ""
+            echo "✗ Refusing to build an unnotarized release. Set ALLOW_UNNOTARIZED=1 for a local test build."
+            exit 1
+        fi
     fi
 fi
 
