@@ -33,7 +33,12 @@ linked binaries silently fail to materialise. `build.sh` sets this already.
   MultitouchSupport framework, loaded with `dlopen`
 - `Sources/SwipeDetector.swift` — contact frames to swipe events
 - `Sources/GestureEngine.swift` — device lifecycle, sleep/wake recovery,
-  keystroke output. "Chrome" means any `com.google.Chrome*` frontmost app:
+  keystroke output. Trackpads are re-enumerated whenever IOKit reports a
+  multitouch device arriving or leaving, and every 20 s as a safety net: a
+  Bluetooth Magic Trackpad reconnects seconds after the wake re-attach passes,
+  and until 1.5 nothing ever looked again — the built-in trackpad worked and
+  the external one was dead until relaunch. That was every "TabSwipe died"
+  report. "Chrome" means any `com.google.Chrome*` frontmost app:
   installed web apps (Gmail, Calendar, "Open as window") are separate app-shim
   processes that own their windows, so the keystroke goes to the shim's pid
 - `Sources/Settings.swift` — UserDefaults-backed preferences
@@ -149,8 +154,9 @@ What the debug log records: a header (versions, model, Accessibility state,
 each multitouch device with id/family/built-in/running), every gesture arm,
 suppression, lift and fire with the pid the keystroke went to, frontmost-app
 changes as seen by the pid cache, re-attach passes, and a heartbeat every
-minute with the frame count. A heartbeat with zero frames while the user is
-swiping means the trackpad has stopped delivering; frames with "Chrome is not
+minute with the frame count and "attached N of M enumerated". A heartbeat with
+zero frames while the user is swiping means the trackpad has stopped
+delivering — and if M > N, the app is attached to fewer devices than exist; frames with "Chrome is not
 the frontmost app" means the pid cache is the problem; a fire with a pid means
 the app did its job and Chrome ignored the keystroke.
 

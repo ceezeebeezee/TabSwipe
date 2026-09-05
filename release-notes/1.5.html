@@ -1,0 +1,14 @@
+<p>The fix for gestures that stop after sleep.</p>
+<ul>
+  <li>
+    An external trackpad reconnects over Bluetooth a few seconds after your Mac
+    wakes — after TabSwipe had already re-attached, and it never looked again.
+    Now it re-attaches whenever a trackpad arrives or leaves, and double-checks
+    every twenty seconds.
+  </li>
+  <li>
+    Chrome quitting, crashing or relaunching is handled explicitly: a swipe is
+    never sent to a process that is gone, and a fresh Chrome is picked up as
+    soon as it is in front.
+  </li>
+</ul>

@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import IOKit
 import os
 
 // Wiring between the private multitouch framework and Chrome:
@@ -168,6 +169,17 @@ private let touchCallback: MTContactCallback = { device, rawTouches, count, time
         return out
     }
     var lines = outcome.lines
+    var fire = outcome.fire
+    // Chrome can quit or crash between the activation that cached its pid and
+    // this swipe. Posting to a dead pid is silently dropped by macOS; what
+    // matters is that the cache is corrected, and that the log says so.
+    if let target = fire, !GestureEngine.isChromeProcessAlive(target.pid) {
+        if debug { lines.append("Chrome pid \(target.pid) is gone — swipe dropped, target cleared") }
+        stateLock.withLock { state in
+            if state.chromePid == target.pid { state.chromePid = nil }
+        }
+        fire = nil
+    }
 
     // The frontmost-app cache is refreshed every time a gesture starts, on
     // the main thread. By the time the fingers have travelled far enough to
@@ -177,11 +189,18 @@ private let touchCallback: MTContactCallback = { device, rawTouches, count, time
         DispatchQueue.main.async { GestureEngine.shared.refreshChromePid(source: "gesture start") }
     }
 
-    if let (event, pid) = outcome.fire, postTabSwitch(event, to: pid), debug {
+    if let (event, pid) = fire, postTabSwitch(event, to: pid), debug {
         lines.append("Swipe → \(event == .next ? "next" : "previous") tab: "
             + "Ctrl+\(event == .previous ? "Shift+" : "")Tab posted to Chrome (pid \(pid))")
     }
     for line in lines { Log.debug(line) }
+}
+
+// MARK: - IOKit device notifications
+
+private let deviceWatchCallback: IOServiceMatchingCallback = { refcon, iterator in
+    guard let refcon else { return }
+    Unmanaged<GestureEngine>.fromOpaque(refcon).takeUnretainedValue().deviceSetDidChange(iterator)
 }
 
 // MARK: - GestureEngine
@@ -201,6 +220,20 @@ public final class GestureEngine {
     private var observers: [NSObjectProtocol] = []
     private var pendingReattach: [DispatchWorkItem] = []
 
+    /// The device ids attached by the last attachDevices(), so a later
+    /// enumeration can be compared against what is actually being listened
+    /// to. Nil when the framework cannot report ids (count is compared then).
+    private var attachedDeviceIDs: Set<UInt64>?
+    private var attachedDeviceCount = 0
+
+    /// IOKit notifications for multitouch devices arriving and leaving —
+    /// the Bluetooth trackpad reconnecting after a wake, most importantly.
+    private var ioNotifyPort: IONotificationPortRef?
+    private var ioIterators: [io_iterator_t] = []
+    /// Slow safety net behind the notifications.
+    private var reconcileTimer: Timer?
+    private static let reconcileInterval: TimeInterval = 20
+
     // Debug Logging: a once-a-minute line saying whether frames are flowing.
     private var heartbeat: Timer?
     private var heartbeatFrames: UInt64 = 0
@@ -217,6 +250,7 @@ public final class GestureEngine {
         updateChromePid(NSWorkspace.shared.frontmostApplication, source: "start")
         installObservers()
         attachDevices()
+        installDeviceWatch()
         isRunning = true
     }
 
@@ -224,6 +258,7 @@ public final class GestureEngine {
         assert(Thread.isMainThread, "GestureEngine.stop() must be called on the main thread")
         guard isRunning else { return }
         cancelPendingReattach()
+        removeDeviceWatch()
         removeObservers()
         detachDevices()
         isRunning = false
@@ -252,6 +287,8 @@ public final class GestureEngine {
         deviceList = list
 
         let count = CFArrayGetCount(list)
+        attachedDeviceCount = count
+        attachedDeviceIDs = Self.deviceIDs(in: list, using: mt)
         guard count > 0 else {
             Log.error("No multitouch devices found")
             return
@@ -279,10 +316,115 @@ public final class GestureEngine {
         }
         devices.removeAll()
         deviceList = nil
+        attachedDeviceIDs = nil
+        attachedDeviceCount = 0
         // Whatever gesture was in flight died with the devices. Without this
         // a "suppressed until every finger lifts" from before a sleep would
         // wait for a lift frame that the old device will never deliver.
         stateLock.withLock { $0.detector.reset() }
+    }
+
+    // MARK: Device watch
+
+    /// The set of device ids the framework enumerates, or nil if it cannot
+    /// report ids on this macOS. The list is released again immediately.
+    private static func deviceIDs(in list: CFArray, using mt: MTFramework) -> Set<UInt64>? {
+        guard let getID = mt.deviceGetID else { return nil }
+        var ids = Set<UInt64>()
+        for i in 0..<CFArrayGetCount(list) {
+            let device = UnsafeMutableRawPointer(mutating: CFArrayGetValueAtIndex(list, i)!)
+            var id: UInt64 = 0
+            if getID(device, &id) == 0 { ids.insert(id) }
+        }
+        return ids
+    }
+
+    /// Re-enumerates and re-attaches if the devices on offer are not the ones
+    /// being listened to. This is what brings an external trackpad back: after
+    /// a wake the re-attach passes run before Bluetooth has reconnected it, so
+    /// they bind only to the built-in trackpad, and nothing else would ever
+    /// look again. Cheap enough to call on a timer — one MTDeviceCreateList.
+    public func reconcileDevices(reason: String) {
+        assert(Thread.isMainThread)
+        guard isRunning, let mt, let list = mt.createDeviceList() else { return }
+        let count = CFArrayGetCount(list)
+        let ids = Self.deviceIDs(in: list, using: mt)
+        let changed: Bool
+        if let ids, let attached = attachedDeviceIDs {
+            changed = ids != attached
+        } else {
+            changed = count != attachedDeviceCount
+        }
+        guard changed else { return }
+        let before = attachedDeviceIDs.map { $0.map { "0x" + String($0, radix: 16) }.sorted() } ?? ["\(attachedDeviceCount) device(s)"]
+        let after = ids.map { $0.map { "0x" + String($0, radix: 16) }.sorted() } ?? ["\(count) device(s)"]
+        Log.notice("Multitouch devices changed (\(reason)): \(before) → \(after) — re-attaching")
+        detachDevices()
+        attachDevices()
+        refreshChromePid(source: "device change")
+    }
+
+    private func installDeviceWatch() {
+        reconcileTimer?.invalidate()
+        reconcileTimer = Timer.scheduledTimer(withTimeInterval: Self.reconcileInterval, repeats: true) { [weak self] _ in
+            self?.reconcileDevices(reason: "periodic check")
+        }
+        reconcileTimer?.tolerance = 5
+
+        guard ioNotifyPort == nil, let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        ioNotifyPort = port
+        IONotificationPortSetDispatchQueue(port, DispatchQueue.main)
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        for kind in [kIOFirstMatchNotification, kIOTerminatedNotification] {
+            var iterator: io_iterator_t = 0
+            // IOServiceMatching returns +1; IOServiceAddMatchingNotification consumes it.
+            let matching = IOServiceMatching("AppleMultitouchDevice")
+            let result = IOServiceAddMatchingNotification(port, kind, matching, deviceWatchCallback, refcon, &iterator)
+            guard result == KERN_SUCCESS else {
+                Log.error("IOServiceAddMatchingNotification(\(kind)) failed: \(result)")
+                continue
+            }
+            // The notification only arms once the iterator has been drained.
+            while IOIteratorNext(iterator) != 0 {}
+            ioIterators.append(iterator)
+        }
+    }
+
+    private func removeDeviceWatch() {
+        reconcileTimer?.invalidate()
+        reconcileTimer = nil
+        for iterator in ioIterators { IOObjectRelease(iterator) }
+        ioIterators.removeAll()
+        if let port = ioNotifyPort {
+            IONotificationPortDestroy(port)
+            ioNotifyPort = nil
+        }
+    }
+
+    /// A device came or went. The framework can lag IOKit by a moment, so
+    /// reconcile shortly after, and once more as a safety net.
+    fileprivate func deviceSetDidChange(_ iterator: io_iterator_t) {
+        var seen = 0
+        while true {
+            let service = IOIteratorNext(iterator)
+            guard service != 0 else { break }
+            IOObjectRelease(service)
+            seen += 1
+        }
+        guard seen > 0 else { return }
+        Log.notice("IOKit reports \(seen) multitouch device(s) arrived or left")
+        for delay in [1.0, 5.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.reconcileDevices(reason: "device \(Int(delay))s after IOKit notice")
+            }
+        }
+    }
+
+    /// Whether `pid` is a live Chrome process — the browser or an app shim.
+    /// Callable from any thread (NSRunningApplication is thread-safe).
+    static func isChromeProcessAlive(_ pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return false }
+        return isChromeBundleIdentifier(app.bundleIdentifier)
     }
 
     // MARK: Observers
@@ -297,6 +439,30 @@ public final class GestureEngine {
         observe(NSWorkspace.didActivateApplicationNotification) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self?.updateChromePid(app, source: "activation")
+        }
+
+        // Chrome quitting, crashing or relaunching. The cached pid is dropped
+        // the moment its process ends — no swipe is ever posted to a stale
+        // pid that a new process might have inherited — and a fresh Chrome is
+        // picked up as soon as it is in front.
+        observe(NSWorkspace.didTerminateApplicationNotification) { [weak self] note in
+            guard let self,
+                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  isChromeBundleIdentifier(app.bundleIdentifier) else { return }
+            let pid = app.processIdentifier
+            let wasTarget = stateLock.withLock { state -> Bool in
+                guard state.chromePid == pid else { return false }
+                state.chromePid = nil
+                return true
+            }
+            Log.notice("\(app.localizedName ?? "Chrome") (pid \(pid)) quit\(wasTarget ? " — it was the swipe target" : "")")
+            self.refreshChromePid(source: "Chrome quit")
+        }
+        observe(NSWorkspace.didLaunchApplicationNotification) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  isChromeBundleIdentifier(app.bundleIdentifier) else { return }
+            Log.notice("\(app.localizedName ?? "Chrome") launched (pid \(app.processIdentifier))")
+            self?.refreshChromePid(source: "Chrome launch")
         }
 
         // The wake notification can arrive before the trackpad has finished
@@ -450,8 +616,9 @@ public final class GestureEngine {
             guard let isRunning = mt?.deviceIsRunning else { return "?" }
             return isRunning(device) ? "running" : "NOT running"
         }
+        let enumerated = mt.flatMap { $0.createDeviceList() }.map { CFArrayGetCount($0) }
         Log.debug("Heartbeat: \(delta) touch frames in the last minute, \(lastSeen); "
-            + "devices \(running); \(pid.map { "Chrome frontmost (pid \($0))" } ?? "Chrome not frontmost"); "
+            + "attached \(running) of \(enumerated.map(String.init) ?? "?") enumerated; \(pid.map { "Chrome frontmost (pid \($0))" } ?? "Chrome not frontmost"); "
             + "Accessibility \(AXIsProcessTrusted() ? "granted" : "NOT granted")")
     }
 
